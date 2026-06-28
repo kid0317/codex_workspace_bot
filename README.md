@@ -40,14 +40,26 @@ tasks, sessions, attachments, and Feishu routing behavior.
 
 ```bash
 cp config.yaml.template config.yaml
-./start.sh
+./build.sh
+./start.sh start
 ```
 
 For local debug testing, start with an explicit token:
 
 ```bash
-DEBUG=true ./start.sh
+DEBUG=true DEBUG_TOKEN=dev-token ./start.sh restart
 ```
+
+Process commands:
+
+```bash
+./start.sh start
+./start.sh stop
+./start.sh restart
+./start.sh status
+```
+
+`start.sh` starts `dist/codex_workspace_bot` and manages `server.pid`, `server.log`, and `server.log.wf`.
 
 The first scaffold uses `engine.type: mock`. Real Feishu network calls and the
 real Codex app-server protocol client remain behind package boundaries for
@@ -96,7 +108,7 @@ bash scripts/story06_smoke.sh
 The script records `/health`, `/debug/dispatch`, `/debug/task/run`, SQLite evidence, artifact cleanliness, and debug disabled checks under `docs/evidence/story06/latest/`.
 
 1. Build: `go build ./...`
-2. Start: `DEBUG=true DEBUG_TOKEN=dev-token ./start.sh`
+2. Start: `DEBUG=true DEBUG_TOKEN=dev-token ./start.sh restart`
 3. Health: `curl -s http://127.0.0.1:8080/health`
 4. Dispatch smoke:
 

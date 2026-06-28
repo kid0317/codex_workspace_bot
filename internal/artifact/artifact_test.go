@@ -40,7 +40,11 @@ func TestStory06EvidenceArtifactsExist(t *testing.T) {
 		"../../start.sh": {
 			"DEBUG_TOKEN",
 			"config.yaml.template",
-			"go run ./cmd/server",
+			"dist/codex_workspace_bot",
+			"start|stop|restart|status",
+			"server.pid",
+			"server.log",
+			"server.log.wf",
 		},
 		"../../build.sh": {
 			"go test ./...",

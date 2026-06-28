@@ -32,14 +32,26 @@ Story 06 提供第一版可运行 Go scaffold：mock 引擎边界、旧配置/wo
 
 ```bash
 cp config.yaml.template config.yaml
-./start.sh
+./build.sh
+./start.sh start
 ```
 
 本地 debug 测试需要显式启用 token：
 
 ```bash
-DEBUG=true ./start.sh
+DEBUG=true DEBUG_TOKEN=dev-token ./start.sh restart
 ```
+
+进程命令：
+
+```bash
+./start.sh start
+./start.sh stop
+./start.sh restart
+./start.sh status
+```
+
+`start.sh` 会启动 `dist/codex_workspace_bot`，并管理 `server.pid`、`server.log`、`server.log.wf`。
 
 第一版 scaffold 使用 `engine.type: mock`。真实飞书网络调用和真实 Codex app-server 协议客户端仍在包边界后，属于后续 story。
 
@@ -86,7 +98,7 @@ bash scripts/story06_smoke.sh
 脚本会在 `docs/evidence/story06/latest/` 记录 `/health`、`/debug/dispatch`、`/debug/task/run`、SQLite 证据、artifact cleanliness、debug disabled 检查。
 
 1. 构建：`./build.sh`
-2. 启动：`DEBUG=true DEBUG_TOKEN=dev-token ./start.sh`
+2. 启动：`DEBUG=true DEBUG_TOKEN=dev-token ./start.sh restart`
 3. 健康检查：`curl -s http://127.0.0.1:8080/health`
 4. Dispatch smoke：
 
