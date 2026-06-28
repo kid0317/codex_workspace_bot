@@ -53,6 +53,26 @@ The first scaffold uses `engine.type: mock`. Real Feishu network calls and the
 real Codex app-server protocol client remain behind package boundaries for
 follow-up stories.
 
+## Build
+
+Use the checked-in build script for local verification and binary output:
+
+```bash
+./build.sh
+```
+
+The script runs `gofmt -l .`, `go test ./...`, `go vet ./...`, and then builds:
+
+```bash
+dist/codex_workspace_bot
+```
+
+Optional overrides:
+
+```bash
+OUT_DIR=/tmp/codex-build BINARY_NAME=bot ./build.sh
+```
+
 ## Debug Safety
 
 Debug APIs are intended for local development and test only.
