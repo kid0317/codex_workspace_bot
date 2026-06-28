@@ -1,0 +1,5 @@
+name: System
+enabled: true
+cron: "0 * * * *"
+send_output: false
+prompt: "system maintenance"

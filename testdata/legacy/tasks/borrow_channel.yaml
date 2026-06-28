@@ -1,0 +1,7 @@
+name: Borrow Channel
+enabled: true
+cron: "0 10 * * *"
+target_type: group
+target_id: oc_group
+send_output: false
+prompt: "silent maintenance"

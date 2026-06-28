@@ -1,0 +1,169 @@
+server:
+  port: 8080
+  debug_enabled: true
+engine:
+  type: mock
+claude:
+  default_provider: anthropic
+  providers:
+    anthropic:
+      model: sonnet
+      effort: medium
+      auth_token: EXAMPLE_PROVIDER_TOKEN_DO_NOT_USE
+    bailian:
+      base_url: https://example.invalid/anthropic
+      model: qwen-plus
+apps:
+  - id: work-alpha
+    feishu_app_id: cli_alpha
+    feishu_app_secret: REDACTED_FEISHU_APP_SECRET_ALPHA
+    feishu_verification_token: REDACTED_FEISHU_VERIFICATION_TOKEN_ALPHA
+    feishu_encrypt_key: REDACTED_FEISHU_ENCRYPT_KEY_ALPHA
+    workspace_dir: ./testdata/legacy/workspace_minimal
+    workspace_mode: work
+    claude:
+      provider: anthropic
+      model: sonnet
+      effort: medium
+      allowed_tools: [Read, Grep]
+  - id: companion-beta
+    feishu_app_id: cli_beta
+    feishu_app_secret: REDACTED_FEISHU_APP_SECRET_BETA
+    workspace_dir: ./testdata/legacy/workspace_minimal
+    workspace_mode: companion
+    claude:
+      provider: bailian
+      model: qwen-plus
+  - id: work-gamma
+    feishu_app_id: cli_gamma
+    feishu_app_secret: REDACTED_FEISHU_APP_SECRET_GAMMA
+    workspace_dir: ./testdata/legacy/workspace_minimal
+    workspace_mode: work
+  - id: work-04
+    feishu_app_id: cli_work_04
+    feishu_app_secret: REDACTED_FEISHU_APP_SECRET_04
+    workspace_dir: ./testdata/legacy/workspace_minimal
+    workspace_mode: work
+  - id: work-05
+    feishu_app_id: cli_work_05
+    feishu_app_secret: REDACTED_FEISHU_APP_SECRET_05
+    workspace_dir: ./testdata/legacy/workspace_minimal
+    workspace_mode: work
+  - id: work-06
+    feishu_app_id: cli_work_06
+    feishu_app_secret: REDACTED_FEISHU_APP_SECRET_06
+    workspace_dir: ./testdata/legacy/workspace_minimal
+    workspace_mode: work
+  - id: work-07
+    feishu_app_id: cli_work_07
+    feishu_app_secret: REDACTED_FEISHU_APP_SECRET_07
+    workspace_dir: ./testdata/legacy/workspace_minimal
+    workspace_mode: work
+  - id: work-08
+    feishu_app_id: cli_work_08
+    feishu_app_secret: REDACTED_FEISHU_APP_SECRET_08
+    workspace_dir: ./testdata/legacy/workspace_minimal
+    workspace_mode: work
+  - id: work-09
+    feishu_app_id: cli_work_09
+    feishu_app_secret: REDACTED_FEISHU_APP_SECRET_09
+    workspace_dir: ./testdata/legacy/workspace_minimal
+    workspace_mode: work
+  - id: work-10
+    feishu_app_id: cli_work_10
+    feishu_app_secret: REDACTED_FEISHU_APP_SECRET_10
+    workspace_dir: ./testdata/legacy/workspace_minimal
+    workspace_mode: work
+  - id: work-11
+    feishu_app_id: cli_work_11
+    feishu_app_secret: REDACTED_FEISHU_APP_SECRET_11
+    workspace_dir: ./testdata/legacy/workspace_minimal
+    workspace_mode: work
+  - id: work-12
+    feishu_app_id: cli_work_12
+    feishu_app_secret: REDACTED_FEISHU_APP_SECRET_12
+    workspace_dir: ./testdata/legacy/workspace_minimal
+    workspace_mode: work
+  - id: work-13
+    feishu_app_id: cli_work_13
+    feishu_app_secret: REDACTED_FEISHU_APP_SECRET_13
+    workspace_dir: ./testdata/legacy/workspace_minimal
+    workspace_mode: work
+  - id: work-14
+    feishu_app_id: cli_work_14
+    feishu_app_secret: REDACTED_FEISHU_APP_SECRET_14
+    workspace_dir: ./testdata/legacy/workspace_minimal
+    workspace_mode: work
+  - id: work-15
+    feishu_app_id: cli_work_15
+    feishu_app_secret: REDACTED_FEISHU_APP_SECRET_15
+    workspace_dir: ./testdata/legacy/workspace_minimal
+    workspace_mode: work
+  - id: work-16
+    feishu_app_id: cli_work_16
+    feishu_app_secret: REDACTED_FEISHU_APP_SECRET_16
+    workspace_dir: ./testdata/legacy/workspace_minimal
+    workspace_mode: work
+  - id: work-17
+    feishu_app_id: cli_work_17
+    feishu_app_secret: REDACTED_FEISHU_APP_SECRET_17
+    workspace_dir: ./testdata/legacy/workspace_minimal
+    workspace_mode: work
+  - id: work-18
+    feishu_app_id: cli_work_18
+    feishu_app_secret: REDACTED_FEISHU_APP_SECRET_18
+    workspace_dir: ./testdata/legacy/workspace_minimal
+    workspace_mode: work
+  - id: work-19
+    feishu_app_id: cli_work_19
+    feishu_app_secret: REDACTED_FEISHU_APP_SECRET_19
+    workspace_dir: ./testdata/legacy/workspace_minimal
+    workspace_mode: work
+  - id: work-20
+    feishu_app_id: cli_work_20
+    feishu_app_secret: REDACTED_FEISHU_APP_SECRET_20
+    workspace_dir: ./testdata/legacy/workspace_minimal
+    workspace_mode: work
+  - id: work-21
+    feishu_app_id: cli_work_21
+    feishu_app_secret: REDACTED_FEISHU_APP_SECRET_21
+    workspace_dir: ./testdata/legacy/workspace_minimal
+    workspace_mode: work
+  - id: work-22
+    feishu_app_id: cli_work_22
+    feishu_app_secret: REDACTED_FEISHU_APP_SECRET_22
+    workspace_dir: ./testdata/legacy/workspace_minimal
+    workspace_mode: work
+  - id: companion-02
+    feishu_app_id: cli_companion_02
+    feishu_app_secret: REDACTED_FEISHU_APP_SECRET_C02
+    workspace_dir: ./testdata/legacy/workspace_minimal
+    workspace_mode: companion
+    claude:
+      provider: anthropic
+      model: sonnet
+  - id: companion-03
+    feishu_app_id: cli_companion_03
+    feishu_app_secret: REDACTED_FEISHU_APP_SECRET_C03
+    workspace_dir: ./testdata/legacy/workspace_minimal
+    workspace_mode: companion
+  - id: companion-04
+    feishu_app_id: cli_companion_04
+    feishu_app_secret: REDACTED_FEISHU_APP_SECRET_C04
+    workspace_dir: ./testdata/legacy/workspace_minimal
+    workspace_mode: companion
+  - id: companion-05
+    feishu_app_id: cli_companion_05
+    feishu_app_secret: REDACTED_FEISHU_APP_SECRET_C05
+    workspace_dir: ./testdata/legacy/workspace_minimal
+    workspace_mode: companion
+  - id: companion-06
+    feishu_app_id: cli_companion_06
+    feishu_app_secret: REDACTED_FEISHU_APP_SECRET_C06
+    workspace_dir: ./testdata/legacy/workspace_minimal
+    workspace_mode: companion
+  - id: companion-07
+    feishu_app_id: cli_companion_07
+    feishu_app_secret: REDACTED_FEISHU_APP_SECRET_C07
+    workspace_dir: ./testdata/legacy/workspace_minimal
+    workspace_mode: companion

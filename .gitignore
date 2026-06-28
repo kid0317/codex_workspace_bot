@@ -1,0 +1,16 @@
+/server
+/bot.db
+/runtime/
+/workspaces/
+*.log
+*.pid
+*.db
+*.db-shm
+*.db-wal
+!/testdata/legacy/bot.db
+!/testdata/chat_history/bot.db
+*.bak
+config.yaml
+config.*.yaml
+!/config.yaml.template
+!/testdata/legacy/config.redacted.yaml

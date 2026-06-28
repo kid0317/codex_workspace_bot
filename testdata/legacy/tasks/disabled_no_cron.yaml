@@ -1,0 +1,4 @@
+name: Disabled
+enabled: false
+send_output: false
+prompt: "disabled task"

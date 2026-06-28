@@ -1,0 +1,47 @@
+server:
+  port: 8080
+  debug_enabled: true
+  debug_bind: "127.0.0.1"
+  max_body_bytes: 1048576
+
+engine:
+  type: mock
+
+codex:
+  app_server:
+    listen: unix
+    auth: capability-token
+    approval_policy: untrusted
+    schema_version: "0.142"
+    runtime_dir: ./runtime/codex
+    topology: per-app
+
+session:
+  worker_idle_timeout_minutes: 30
+  queue_size: 64
+  duplicate_message_ttl_hours: 24
+
+cleanup:
+  attachments_retention_days: 7
+  attachments_max_days: 30
+  schedule: "0 2 * * *"
+
+approval:
+  mock_policy: auto_allow
+  timeout_seconds: 300
+
+apps:
+  - id: demo-assistant
+    feishu_app_id: cli_demo
+    feishu_app_secret: EXAMPLE_FEISHU_APP_SECRET_DO_NOT_USE
+    feishu_verification_token: ""
+    feishu_encrypt_key: ""
+    workspace_dir: ./workspaces/demo-assistant
+    workspace_mode: work
+    allowed_chats: []
+    claude:
+      permission_mode: acceptEdits
+      allowed_tools: []
+      provider: anthropic
+      model: sonnet
+      effort: medium

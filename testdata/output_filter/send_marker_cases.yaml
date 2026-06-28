@@ -1,0 +1,4 @@
+- input: "a [[SEND]] b"
+  segments: ["a","b"]
+- input: "[[SEND]]a"
+  segments: ["a"]
