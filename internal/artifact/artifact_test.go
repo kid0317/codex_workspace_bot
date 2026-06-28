@@ -18,3 +18,41 @@ func TestGitignoreCoversRuntimeArtifacts(t *testing.T) {
 		}
 	}
 }
+
+func TestStory06EvidenceArtifactsExist(t *testing.T) {
+	required := map[string][]string{
+		"../../scripts/story06_smoke.sh": {
+			"/health",
+			"/debug/dispatch",
+			"/debug/task/run",
+			"sqlite3",
+			"git status --ignored --short",
+			"debug disabled",
+		},
+		"../../docs/evidence/story06/README.md": {
+			"health",
+			"debug dispatch",
+			"task run",
+			"SQLite",
+			"artifact cleanliness",
+			"debug disabled",
+		},
+		"../../start.sh": {
+			"DEBUG_TOKEN",
+			"config.yaml.template",
+			"go run ./cmd/server",
+		},
+	}
+	for path, needles := range required {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("missing evidence artifact %s: %v", path, err)
+		}
+		text := string(data)
+		for _, needle := range needles {
+			if !strings.Contains(text, needle) {
+				t.Fatalf("%s missing %q", path, needle)
+			}
+		}
+	}
+}

@@ -29,7 +29,7 @@ func main() {
 		os.Exit(1)
 	}
 	addr := fmt.Sprintf("%s:%d", cfg.Server.DebugBind, cfg.Server.Port)
-	server := &http.Server{Addr: addr, Handler: rt.Handler}
+	server := newHTTPServer(addr, rt.Handler)
 	errCh := make(chan error, 1)
 	go func() {
 		errCh <- server.ListenAndServe()
@@ -50,8 +50,21 @@ func main() {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	_ = server.Shutdown(ctx)
+	_ = rt.Close(ctx)
 }
 
 func defaultConfigPath() string {
 	return "config.yaml"
+}
+
+func newHTTPServer(addr string, handler http.Handler) *http.Server {
+	return &http.Server{
+		Addr:              addr,
+		Handler:           handler,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       60 * time.Second,
+		MaxHeaderBytes:    1 << 20,
+	}
 }

@@ -83,7 +83,14 @@ type Attachment struct {
 	OriginalName string
 	TempPath     string
 	SessionPath  string
+	SourceMsgID  string `gorm:"index"`
 	CreatedAt    time.Time
+}
+
+type EventReceipt struct {
+	MessageID string `gorm:"primaryKey"`
+	AppID     string `gorm:"index"`
+	CreatedAt time.Time
 }
 
 type ApprovalRequest struct {

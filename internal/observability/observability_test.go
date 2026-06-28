@@ -1,7 +1,10 @@
 package observability_test
 
 import (
+	"bufio"
 	"encoding/json"
+	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -30,4 +33,52 @@ func TestLifecycleEventHasStableFieldsAndPreservesZeroUsage(t *testing.T) {
 	if fields["input_tokens"].(float64) != 0 || fields["output_tokens"].(float64) != 0 {
 		t.Fatalf("zero usage not preserved: %s", data)
 	}
+}
+
+func TestTelemetryFixturesPreserveZeroUsageAndFailOpenMalformedRows(t *testing.T) {
+	rows := readJSONLines(t, "../../testdata/telemetry/langfuse_dryrun_rows.jsonl")
+	if len(rows) != 2 {
+		t.Fatalf("telemetry rows = %d, want 2", len(rows))
+	}
+	if rows[0]["input_tokens"].(float64) != 0 || rows[0]["output_tokens"].(float64) != 0 {
+		t.Fatalf("zero usage row not preserved: %#v", rows[0])
+	}
+
+	data, err := os.ReadFile("../../testdata/telemetry/malformed_rows.jsonl")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var valid int
+	scanner := bufio.NewScanner(strings.NewReader(string(data)))
+	for scanner.Scan() {
+		var row map[string]any
+		if err := json.Unmarshal(scanner.Bytes(), &row); err == nil {
+			valid++
+		}
+	}
+	if valid != 0 {
+		t.Fatalf("malformed fixture unexpectedly had %d valid rows", valid)
+	}
+}
+
+func readJSONLines(t *testing.T, path string) []map[string]any {
+	t.Helper()
+	file, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	var rows []map[string]any
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		var row map[string]any
+		if err := json.Unmarshal(scanner.Bytes(), &row); err != nil {
+			t.Fatal(err)
+		}
+		rows = append(rows, row)
+	}
+	if err := scanner.Err(); err != nil {
+		t.Fatal(err)
+	}
+	return rows
 }

@@ -29,7 +29,7 @@ func TestLoadLegacyConfigPreservesShapeAndRedactsSecrets(t *testing.T) {
 		t.Fatalf("debug_bind = %q, want localhost", cfg.Server.DebugBind)
 	}
 	rendered := cfg.RedactedString()
-	for _, secret := range []string{"REDACTED_FEISHU_APP_SECRET_ALPHA", "REDACTED_FEISHU_VERIFICATION_TOKEN_ALPHA", "REDACTED_FEISHU_ENCRYPT_KEY_ALPHA", "EXAMPLE_PROVIDER_TOKEN_DO_NOT_USE"} {
+	for _, secret := range []string{"REDACTED_DEBUG_TOKEN", "REDACTED_FEISHU_APP_ID_ALPHA", "REDACTED_FEISHU_APP_SECRET_ALPHA", "REDACTED_FEISHU_VERIFICATION_TOKEN_ALPHA", "REDACTED_FEISHU_ENCRYPT_KEY_ALPHA", "EXAMPLE_PROVIDER_TOKEN_DO_NOT_USE"} {
 		if strings.Contains(rendered, secret) {
 			t.Fatalf("redacted config leaked secret %q in %s", secret, rendered)
 		}
@@ -47,6 +47,9 @@ func TestLoadCheckedInTemplate(t *testing.T) {
 	if cfg.Codex.AppServer.Topology != "per-app" {
 		t.Fatalf("template topology = %q", cfg.Codex.AppServer.Topology)
 	}
+	if cfg.Attachments.PendingTTLMinutes == 0 || cfg.Attachments.PendingMaxItems == 0 || cfg.Attachments.MaxBytesPerAttachment == 0 {
+		t.Fatalf("template attachment limits not loaded: %#v", cfg.Attachments)
+	}
 }
 
 func TestValidateRejectsUnsafeDebugBindWithoutExplicitOptIn(t *testing.T) {
@@ -61,6 +64,7 @@ func TestValidateRejectsUnsafeDebugBindWithoutExplicitOptIn(t *testing.T) {
 		t.Fatal("Validate() should reject non-local debug bind without opt-in")
 	}
 	cfg.Server.AllowNonLocalDebugBind = true
+	cfg.Server.DebugToken = "test-token"
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("Validate() with opt-in error = %v", err)
 	}

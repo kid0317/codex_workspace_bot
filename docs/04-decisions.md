@@ -27,11 +27,16 @@ Codex compatibility should be additive and reversible.
 
 ## D004: App-Server Is The First Engine
 
-Decision: this phase will implement Codex app-server as the primary engine.
+Decision: Codex app-server is the target primary engine for the migration, but
+Story 06 implements only the mock-backed app-server-shaped boundary. The real
+Codex app-server protocol client is a follow-up story behind the
+`internal/codexapp` package boundary.
 
-Reason: the user explicitly wants app-server in this phase. AIPM POC_R1 proves
-the app-server protocol has the streaming, approval, interrupt, and steer
-capabilities needed to replace Claude hooks and support Feishu streaming UX.
+Reason: AIPM POC_R1 proves the app-server protocol has the streaming, approval,
+interrupt, and steer capabilities needed to replace Claude hooks and support
+Feishu streaming UX. Story 06 first stabilizes non-engine orchestration,
+compatibility, state, tasks, guardrails, debug APIs, and evidence without
+coupling those areas to the still-evolving app-server protocol.
 
 ## D005: Do Not Copy AIPM FC/NAS Three-State Sandbox
 

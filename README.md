@@ -3,8 +3,8 @@
 Codex Workspace Bot is the Codex-native successor to `cc_workspace_bot`.
 
 The first compatibility target is direct operation of an existing legacy
-`cc_workspace_bot`-style app list and workspace directories, while replacing
-the core Claude Code engine with Codex app-server.
+`cc_workspace_bot`-style app list and workspace directories, while preparing
+the core Claude Code engine boundary for Codex app-server.
 
 Project documentation lives under `docs/`.
 
@@ -40,7 +40,13 @@ tasks, sessions, attachments, and Feishu routing behavior.
 
 ```bash
 cp config.yaml.template config.yaml
-go run ./cmd/server config.yaml
+./start.sh
+```
+
+For local debug testing, start with an explicit token:
+
+```bash
+DEBUG=true ./start.sh
 ```
 
 The first scaffold uses `engine.type: mock`. Real Feishu network calls and the
@@ -53,21 +59,31 @@ Debug APIs are intended for local development and test only.
 
 - Keep `server.debug_enabled: false` outside dev/test unless a test window is explicitly approved.
 - Keep `server.debug_bind: 127.0.0.1` for normal use.
-- If a non-local bind is explicitly enabled, set `server.debug_token` and send it as `X-Debug-Token` or `Authorization: Bearer ...`.
+- When debug is enabled, set `server.debug_token` and send it as `X-Debug-Token` or `Authorization: Bearer ...`.
 - Do not expose debug endpoints through a public ingress.
+- Keep debug attachment `temp_dir` under a framework-owned download/temp directory. Do not point it at a whole workspace root.
 
 ## Dev/Test Deployment Check
 
 Use the same binary and config template in dev and test, with environment-specific workspace paths and redacted credentials.
 
+For repeatable local mock-scaffold evidence, run:
+
+```bash
+bash scripts/story06_smoke.sh
+```
+
+The script records `/health`, `/debug/dispatch`, `/debug/task/run`, SQLite evidence, artifact cleanliness, and debug disabled checks under `docs/evidence/story06/latest/`.
+
 1. Build: `go build ./...`
-2. Start: `go run ./cmd/server config.yaml`
+2. Start: `DEBUG=true DEBUG_TOKEN=dev-token ./start.sh`
 3. Health: `curl -s http://127.0.0.1:8080/health`
 4. Dispatch smoke:
 
 ```bash
 curl -s -X POST http://127.0.0.1:8080/debug/dispatch \
   -H 'Content-Type: application/json' \
+  -H 'X-Debug-Token: dev-token' \
   -d '{"app_id":"demo-assistant","chat_id":"oc_demo","sender_id":"ou_demo","message_id":"manual-1","text":"hello"}'
 ```
 
@@ -76,6 +92,7 @@ curl -s -X POST http://127.0.0.1:8080/debug/dispatch \
 ```bash
 curl -s -X POST http://127.0.0.1:8080/debug/task/run \
   -H 'Content-Type: application/json' \
+  -H 'X-Debug-Token: dev-token' \
   -d '{"app_id":"demo-assistant","task":{"id":"demo-assistant/manual","target_type":"p2p","target_id":"oc_demo","send_output":true,"prompt":"manual task","enabled":true}}'
 ```
 
@@ -105,6 +122,26 @@ The runtime emits structured lifecycle events with app, channel, session, turn, 
 - `approval_resolved`
 - `attachment_expired`
 - process shutdown duration
+
+## Data Retention And Privacy
+
+Story 06 is a local mock scaffold. It stores local development/test data in each app workspace:
+
+- `bot.db`: channels, sessions, messages, tasks, attachment metadata, approvals, and turns.
+- `sessions/`: generated `SESSION_CONTEXT.md` files and consumed attachment copies.
+- `tasks/`: YAML task definitions.
+- `tmp/attachments` or configured `attachments.temp_dir`: temporary downloaded/mock attachment files.
+
+Do not use live Feishu credentials or production user data with this scaffold. Debug APIs should only be enabled for controlled local/dev-test runs with a token. Runtime cleanup expires pending attachments according to configured retention; message, task, turn, and approval history remains in `bot.db` until the workspace owner archives or removes the workspace copy.
+
+Deletion procedure for dev/test data:
+
+1. Stop the process so workers and schedulers drain.
+2. Archive or remove the copied workspace directory for the test environment.
+3. If retaining the workspace, remove only generated `sessions/`, `tmp/attachments`, and the copied `bot.db` after confirming the data is not needed for audit evidence.
+4. Never delete a production-like legacy `bot.db` in place; take a snapshot and use additive migrations only.
+
+Third-party dependency notes are tracked in `THIRD_PARTY_NOTICES.md`.
 
 ## Verification
 

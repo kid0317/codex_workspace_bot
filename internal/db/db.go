@@ -11,7 +11,8 @@ import (
 )
 
 type Store struct {
-	db *gorm.DB
+	db   *gorm.DB
+	path string
 }
 
 func Open(path string) (*Store, error) {
@@ -19,15 +20,17 @@ func Open(path string) (*Store, error) {
 	if err != nil {
 		return nil, fmt.Errorf("打开 sqlite: %w", err)
 	}
-	store := &Store{db: gdb}
+	store := &Store{db: gdb, path: path}
 	if err := store.Migrate(); err != nil {
 		return nil, err
 	}
 	return store, nil
 }
 
+func (s *Store) Path() string { return s.path }
+
 func (s *Store) Migrate() error {
-	if err := s.db.AutoMigrate(&model.Channel{}, &model.Session{}, &model.Message{}, &model.Task{}, &model.Attachment{}, &model.ApprovalRequest{}, &model.Turn{}); err != nil {
+	if err := s.db.AutoMigrate(&model.Channel{}, &model.Session{}, &model.Message{}, &model.Task{}, &model.Attachment{}, &model.ApprovalRequest{}, &model.Turn{}, &model.EventReceipt{}); err != nil {
 		return fmt.Errorf("迁移 sqlite: %w", err)
 	}
 	return nil
@@ -44,6 +47,9 @@ func (s *Store) Attachments() AttachmentRepo { return AttachmentRepo{s.db} }
 func (s *Store) Turns() TurnRepo             { return TurnRepo{s.db} }
 func (s *Store) Tasks() TaskRepo             { return TaskRepo{s.db} }
 func (s *Store) Approvals() ApprovalRepo     { return ApprovalRepo{s.db} }
+func (s *Store) EventReceipts() EventReceiptRepo {
+	return EventReceiptRepo{s.db}
+}
 
 func (s *Store) HasColumn(table, column string) bool {
 	return s.db.Migrator().HasColumn(table, column)
@@ -132,10 +138,22 @@ func (r AttachmentRepo) Save(att model.Attachment) error {
 	return r.db.Save(&att).Error
 }
 
+func (r AttachmentRepo) PendingChannelKeys() ([]string, error) {
+	var keys []string
+	err := r.db.Model(&model.Attachment{}).Where("state = ?", model.AttachmentPending).Distinct().Pluck("channel_key", &keys).Error
+	return keys, err
+}
+
 func (r AttachmentRepo) ByChannelState(channelKey, state string) ([]model.Attachment, error) {
 	var out []model.Attachment
 	err := r.db.Order("created_at asc").Find(&out, "channel_key = ? AND state = ?", channelKey, state).Error
 	return out, err
+}
+
+func (r AttachmentRepo) CountByChannelState(channelKey, state string) (int64, error) {
+	var n int64
+	err := r.db.Model(&model.Attachment{}).Where("channel_key = ? AND state = ?", channelKey, state).Count(&n).Error
+	return n, err
 }
 
 func (r AttachmentRepo) UpdateState(channelKey, fromState, toState, sessionID string) error {
@@ -158,6 +176,24 @@ func (r AttachmentRepo) ExpirePending(channelKey string) error {
 	return r.db.Model(&model.Attachment{}).Where("channel_key = ? AND state = ?", channelKey, model.AttachmentPending).Update("state", model.AttachmentExpired).Error
 }
 
+func (r AttachmentRepo) ExpirePendingBefore(channelKey string, cutoff time.Time) ([]model.Attachment, error) {
+	var attachments []model.Attachment
+	if err := r.db.Where("channel_key = ? AND state = ? AND created_at <= ?", channelKey, model.AttachmentPending, cutoff).Find(&attachments).Error; err != nil {
+		return nil, err
+	}
+	if len(attachments) == 0 {
+		return nil, nil
+	}
+	ids := make([]string, 0, len(attachments))
+	for _, att := range attachments {
+		ids = append(ids, att.ID)
+	}
+	if err := r.db.Model(&model.Attachment{}).Where("id IN ?", ids).Update("state", model.AttachmentExpired).Error; err != nil {
+		return nil, err
+	}
+	return attachments, nil
+}
+
 type TurnRepo struct{ db *gorm.DB }
 
 func (r TurnRepo) Save(turn model.Turn) error {
@@ -174,6 +210,20 @@ type TaskRepo struct{ db *gorm.DB }
 
 func (r TaskRepo) Save(task model.Task) error {
 	return r.db.Save(&task).Error
+}
+
+func (r TaskRepo) All() ([]model.Task, error) {
+	var tasks []model.Task
+	err := r.db.Order("id asc").Find(&tasks).Error
+	return tasks, err
+}
+
+func (r TaskRepo) DisableMissing(appID string, keepIDs []string) error {
+	q := r.db.Model(&model.Task{}).Where("app_id = ?", appID)
+	if len(keepIDs) > 0 {
+		q = q.Where("id NOT IN ?", keepIDs)
+	}
+	return q.Update("enabled", false).Error
 }
 
 type ApprovalRepo struct{ db *gorm.DB }
@@ -207,4 +257,40 @@ func (r ApprovalRepo) ResolvePending(appID, id, status, decisionJSON string) (bo
 			"resolved_at":   &now,
 		})
 	return result.RowsAffected == 1, result.Error
+}
+
+func (r ApprovalRepo) ExpirePendingBefore(appID string, cutoff time.Time) error {
+	now := time.Now()
+	return r.db.Model(&model.ApprovalRequest{}).
+		Where("app_id = ? AND status = ? AND expires_at <= ?", appID, "pending_user", cutoff).
+		Updates(map[string]any{
+			"status":      "expired",
+			"resolved_at": &now,
+		}).Error
+}
+
+type EventReceiptRepo struct{ db *gorm.DB }
+
+func (r EventReceiptRepo) Seen(messageID string) (bool, error) {
+	if messageID == "" {
+		return false, nil
+	}
+	var n int64
+	err := r.db.Model(&model.EventReceipt{}).Where("message_id = ?", messageID).Count(&n).Error
+	return n > 0, err
+}
+
+func (r EventReceiptRepo) Save(messageID, appID string) error {
+	if messageID == "" {
+		return nil
+	}
+	return r.db.Create(&model.EventReceipt{MessageID: messageID, AppID: appID, CreatedAt: time.Now()}).Error
+}
+
+func (r EventReceiptRepo) PruneBefore(cutoff time.Time) error {
+	return r.db.Where("created_at < ?", cutoff).Delete(&model.EventReceipt{}).Error
+}
+
+func (r EventReceiptRepo) SetCreatedAtForTest(messageID string, createdAt time.Time) error {
+	return r.db.Model(&model.EventReceipt{}).Where("message_id = ?", messageID).Update("created_at", createdAt).Error
 }

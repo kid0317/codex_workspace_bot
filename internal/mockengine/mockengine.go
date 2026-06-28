@@ -25,7 +25,7 @@ func (e *Engine) SendTurn(ctx context.Context, req engine.TurnRequest) (engine.E
 	case "approval_timeout":
 		return engine.NewSliceStream([]engine.TurnEvent{start, {Type: engine.EventApprovalRequested, ThreadID: threadID, ApprovalID: "approval-timeout", ApprovalJSON: `{"action":"timeout"}`}, {Type: engine.EventFailed, ThreadID: threadID, Error: "approval timeout"}}), nil
 	case "approval_requested":
-		return engine.NewSliceStream([]engine.TurnEvent{start, {Type: engine.EventApprovalRequested, ThreadID: threadID, ApprovalID: "approval-requested", ApprovalJSON: `{"action":"mock"}`}}), nil
+		return engine.NewSliceStream([]engine.TurnEvent{start, {Type: engine.EventApprovalRequested, ThreadID: threadID, ApprovalID: "approval-requested", ApprovalJSON: `{"action":"mock"}`}, {Type: engine.EventFailed, ThreadID: threadID, Error: "approval required"}}), nil
 	default:
 		return engine.NewSliceStream([]engine.TurnEvent{start, {Type: engine.EventDelta, ThreadID: threadID, Text: "hello"}, {Type: engine.EventCompleted, ThreadID: threadID, InputTokens: 1, OutputTokens: 1}}), nil
 	}

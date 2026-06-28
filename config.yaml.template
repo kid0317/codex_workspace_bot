@@ -1,7 +1,8 @@
 server:
   port: 8080
-  debug_enabled: true
+  debug_enabled: false
   debug_bind: "127.0.0.1"
+  debug_token: EXAMPLE_DEBUG_TOKEN_DO_NOT_USE
   max_body_bytes: 1048576
 
 engine:
@@ -25,6 +26,12 @@ cleanup:
   attachments_retention_days: 7
   attachments_max_days: 30
   schedule: "0 2 * * *"
+
+attachments:
+  pending_ttl_minutes: 30
+  pending_max_items: 20
+  max_bytes_per_attachment: 104857600
+  temp_dir: ./workspaces/demo-assistant/tmp/attachments
 
 approval:
   mock_policy: auto_allow

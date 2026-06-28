@@ -22,12 +22,13 @@ import (
 
 func TestDebugDispatchIsLocalSafeAndCreatesSideEffects(t *testing.T) {
 	store, _ := db.Open(filepath.Join(t.TempDir(), "bot.db"))
-	cfg := config.Config{Server: config.ServerConfig{DebugEnabled: true, MaxBodyBytes: 1024}, Apps: []config.AppConfig{{ID: "demo", WorkspaceMode: "work"}}}
+	cfg := config.Config{Server: config.ServerConfig{DebugEnabled: true, DebugToken: "test-token", MaxBodyBytes: 1024}, Apps: []config.AppConfig{{ID: "demo", WorkspaceMode: "work"}}}
 	sender := feishu.NewMockSender()
 	mgr := session.NewManager(store, mockengine.New(), sender, session.Options{WorkspaceMode: "work"})
 	srv := debugapi.New(cfg, map[string]*session.Manager{"demo": mgr})
 
 	req := httptest.NewRequest(http.MethodPost, "/debug/dispatch", bytes.NewBufferString(`{"app_id":"demo","chat_id":"oc","sender_id":"ou","message_id":"m1","text":"hi"}`))
+	req.Header.Set("X-Debug-Token", "test-token")
 	rec := httptest.NewRecorder()
 	srv.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
@@ -47,9 +48,11 @@ func TestDebugDisabledAndUnknownAppAreRejected(t *testing.T) {
 		t.Fatalf("disabled status = %d", rec.Code)
 	}
 
-	srv = debugapi.New(config.Config{Server: config.ServerConfig{DebugEnabled: true, MaxBodyBytes: 8}}, map[string]*session.Manager{})
+	srv = debugapi.New(config.Config{Server: config.ServerConfig{DebugEnabled: true, DebugToken: "test-token", MaxBodyBytes: 8}}, map[string]*session.Manager{})
 	rec = httptest.NewRecorder()
-	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/debug/dispatch", bytes.NewBufferString(`{"app_id":"missing"}`)))
+	req := httptest.NewRequest(http.MethodPost, "/debug/dispatch", bytes.NewBufferString(`{"app_id":"missing"}`))
+	req.Header.Set("X-Debug-Token", "test-token")
+	srv.ServeHTTP(rec, req)
 	if rec.Code != http.StatusRequestEntityTooLarge && rec.Code != http.StatusBadRequest {
 		t.Fatalf("unknown/oversize status = %d", rec.Code)
 	}
@@ -58,7 +61,7 @@ func TestDebugDisabledAndUnknownAppAreRejected(t *testing.T) {
 func TestDebugTaskRunAndApprovalRespondRoutes(t *testing.T) {
 	root := t.TempDir()
 	store, _ := db.Open(filepath.Join(root, "bot.db"))
-	cfg := config.Config{Server: config.ServerConfig{DebugEnabled: true, MaxBodyBytes: 2048}, Apps: []config.AppConfig{{ID: "demo", WorkspaceMode: "work"}}}
+	cfg := config.Config{Server: config.ServerConfig{DebugEnabled: true, DebugToken: "test-token", MaxBodyBytes: 2048}, Apps: []config.AppConfig{{ID: "demo", WorkspaceMode: "work"}}}
 	runner := task.NewRunner(store, mockengine.New(), root)
 	srv := debugapi.NewWithServices(cfg, debugapi.Services{Stores: map[string]*db.Store{"demo": store}, TaskRunners: map[string]*task.Runner{"demo": runner}})
 
@@ -66,7 +69,9 @@ func TestDebugTaskRunAndApprovalRespondRoutes(t *testing.T) {
 	bodyMap := map[string]any{"app_id": "demo", "task": map[string]any{"id": "demo/system", "app_id": "demo", "name": "System", "prompt": "maintain", "send_output": false, "enabled": true}}
 	body, _ := json.Marshal(bodyMap)
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/debug/task/run", bytes.NewReader(body)))
+	req := httptest.NewRequest(http.MethodPost, "/debug/task/run", bytes.NewReader(body))
+	req.Header.Set("X-Debug-Token", "test-token")
+	srv.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("task run status = %d body=%s path=%s", rec.Code, rec.Body.String(), taskPath)
 	}
@@ -75,7 +80,9 @@ func TestDebugTaskRunAndApprovalRespondRoutes(t *testing.T) {
 		t.Fatal(err)
 	}
 	rec = httptest.NewRecorder()
-	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/debug/approval/respond", bytes.NewBufferString(`{"app_id":"demo","approval_id":"a1","decision":"allow"}`)))
+	req = httptest.NewRequest(http.MethodPost, "/debug/approval/respond", bytes.NewBufferString(`{"app_id":"demo","approval_id":"a1","decision":"allow"}`))
+	req.Header.Set("X-Debug-Token", "test-token")
+	srv.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("approval status = %d body=%s", rec.Code, rec.Body.String())
 	}
@@ -84,18 +91,22 @@ func TestDebugTaskRunAndApprovalRespondRoutes(t *testing.T) {
 func TestDebugEndpointsRejectWrongMethodOversizeAndCrossAppTask(t *testing.T) {
 	root := t.TempDir()
 	store, _ := db.Open(filepath.Join(root, "bot.db"))
-	cfg := config.Config{Server: config.ServerConfig{DebugEnabled: true, MaxBodyBytes: 32}, Apps: []config.AppConfig{{ID: "demo", WorkspaceMode: "work"}}}
+	cfg := config.Config{Server: config.ServerConfig{DebugEnabled: true, DebugToken: "test-token", MaxBodyBytes: 32}, Apps: []config.AppConfig{{ID: "demo", WorkspaceMode: "work"}}}
 	runner := task.NewRunner(store, mockengine.New(), root)
 	srv := debugapi.NewWithServices(cfg, debugapi.Services{TaskRunners: map[string]*task.Runner{"demo": runner}})
 
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/debug/task/run", nil))
+	req := httptest.NewRequest(http.MethodGet, "/debug/task/run", nil)
+	req.Header.Set("X-Debug-Token", "test-token")
+	srv.ServeHTTP(rec, req)
 	if rec.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("GET task/run status = %d", rec.Code)
 	}
 
 	rec = httptest.NewRecorder()
-	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/debug/task/run", bytes.NewBufferString(`{"app_id":"demo","task":{"id":"other/system","app_id":"other","send_output":false}}`)))
+	req = httptest.NewRequest(http.MethodPost, "/debug/task/run", bytes.NewBufferString(`{"app_id":"demo","task":{"id":"other/system","app_id":"other","send_output":false}}`))
+	req.Header.Set("X-Debug-Token", "test-token")
+	srv.ServeHTTP(rec, req)
 	if rec.Code != http.StatusRequestEntityTooLarge && rec.Code != http.StatusBadRequest {
 		t.Fatalf("cross-app/oversize status = %d body=%s", rec.Code, rec.Body.String())
 	}
@@ -103,9 +114,19 @@ func TestDebugEndpointsRejectWrongMethodOversizeAndCrossAppTask(t *testing.T) {
 	cfg.Server.MaxBodyBytes = 2048
 	srv = debugapi.NewWithServices(cfg, debugapi.Services{Stores: map[string]*db.Store{"demo": store}, TaskRunners: map[string]*task.Runner{"demo": runner}})
 	rec = httptest.NewRecorder()
-	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/debug/task/run", bytes.NewBufferString(`{"app_id":"demo","task":{"id":"other/system","app_id":"other","send_output":false}}`)))
+	req = httptest.NewRequest(http.MethodPost, "/debug/task/run", bytes.NewBufferString(`{"app_id":"demo","task":{"id":"other/system","app_id":"other","send_output":false}}`))
+	req.Header.Set("X-Debug-Token", "test-token")
+	srv.ServeHTTP(rec, req)
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("cross-app status = %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, "/debug/task/run", bytes.NewBufferString(`{"app_id":"demo","task":{"id":"other","send_output":false,"prompt":"system","enabled":true}}`))
+	req.Header.Set("X-Debug-Token", "test-token")
+	srv.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("non-canonical task id status = %d body=%s", rec.Code, rec.Body.String())
 	}
 }
 
@@ -114,10 +135,12 @@ func TestDebugApprovalRespondUpdatesPersistedRequest(t *testing.T) {
 	if err := store.Approvals().Save(model.ApprovalRequest{ID: "a1", AppID: "demo", Status: "pending_user"}); err != nil {
 		t.Fatal(err)
 	}
-	cfg := config.Config{Server: config.ServerConfig{DebugEnabled: true, MaxBodyBytes: 1024}, Apps: []config.AppConfig{{ID: "demo"}}}
+	cfg := config.Config{Server: config.ServerConfig{DebugEnabled: true, DebugToken: "test-token", MaxBodyBytes: 1024}, Apps: []config.AppConfig{{ID: "demo"}}}
 	srv := debugapi.NewWithServices(cfg, debugapi.Services{Stores: map[string]*db.Store{"demo": store}})
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/debug/approval/respond", bytes.NewBufferString(`{"app_id":"demo","approval_id":"a1","decision":"allow"}`)))
+	req := httptest.NewRequest(http.MethodPost, "/debug/approval/respond", bytes.NewBufferString(`{"app_id":"demo","approval_id":"a1","decision":"allow"}`))
+	req.Header.Set("X-Debug-Token", "test-token")
+	srv.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
 	}
@@ -135,12 +158,14 @@ func TestDebugDispatchSupportsGroupThreadAttachmentsAndScenario(t *testing.T) {
 	sender := feishu.NewMockSender()
 	engine := &scenarioEngine{}
 	mgr := session.NewManager(store, engine, sender, session.Options{WorkspaceMode: "work"})
-	cfg := config.Config{Server: config.ServerConfig{DebugEnabled: true, MaxBodyBytes: 2048}, Apps: []config.AppConfig{{ID: "demo"}}}
+	cfg := config.Config{Server: config.ServerConfig{DebugEnabled: true, DebugToken: "test-token", MaxBodyBytes: 2048}, Apps: []config.AppConfig{{ID: "demo"}}}
 	srv := debugapi.New(cfg, map[string]*session.Manager{"demo": mgr})
 
 	body := `{"app_id":"demo","chat_type":"group","chat_id":"oc_group","thread_id":"thread1","sender_id":"ou","message_id":"m1","text":"hi","scenario":"empty_output","attachments":[{"id":"a1","original_name":"a.txt"}]}`
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/debug/dispatch", bytes.NewBufferString(body)))
+	req := httptest.NewRequest(http.MethodPost, "/debug/dispatch", bytes.NewBufferString(body))
+	req.Header.Set("X-Debug-Token", "test-token")
+	srv.ServeHTTP(rec, req)
 	if rec.Code != http.StatusInternalServerError {
 		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
 	}
@@ -160,18 +185,22 @@ func TestDebugEngineScenarioEndpointControlsMock(t *testing.T) {
 	store, _ := db.Open(filepath.Join(t.TempDir(), "bot.db"))
 	sender := feishu.NewMockSender()
 	mgr := session.NewManager(store, mockengine.New(), sender, session.Options{WorkspaceMode: "work"})
-	cfg := config.Config{Server: config.ServerConfig{DebugEnabled: true, MaxBodyBytes: 2048}, Apps: []config.AppConfig{{ID: "demo"}}}
+	cfg := config.Config{Server: config.ServerConfig{DebugEnabled: true, DebugToken: "test-token", MaxBodyBytes: 2048}, Apps: []config.AppConfig{{ID: "demo"}}}
 	srv := debugapi.New(cfg, map[string]*session.Manager{"demo": mgr})
 
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/debug/engine/scenario", bytes.NewBufferString(`{"app_id":"demo","scenario":"empty_output"}`)))
-	if rec.Code != http.StatusOK {
+	req := httptest.NewRequest(http.MethodPost, "/debug/engine/scenario", bytes.NewBufferString(`{"app_id":"demo","scenario":"empty_output"}`))
+	req.Header.Set("X-Debug-Token", "test-token")
+	srv.ServeHTTP(rec, req)
+	if rec.Code != http.StatusGone {
 		t.Fatalf("scenario status = %d body=%s", rec.Code, rec.Body.String())
 	}
 	rec = httptest.NewRecorder()
-	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/debug/dispatch", bytes.NewBufferString(`{"app_id":"demo","chat_id":"oc","sender_id":"ou","message_id":"m1","text":"hi"}`)))
+	req = httptest.NewRequest(http.MethodPost, "/debug/dispatch", bytes.NewBufferString(`{"app_id":"demo","chat_id":"oc","sender_id":"ou","message_id":"m1","text":"hi","scenario":"empty_output"}`))
+	req.Header.Set("X-Debug-Token", "test-token")
+	srv.ServeHTTP(rec, req)
 	if rec.Code != http.StatusInternalServerError {
-		t.Fatalf("dispatch status = %d body=%s", rec.Code, rec.Body.String())
+		t.Fatalf("per-request scenario dispatch status = %d body=%s", rec.Code, rec.Body.String())
 	}
 }
 
@@ -188,12 +217,25 @@ func TestDebugNonLocalBindRequiresToken(t *testing.T) {
 	}
 }
 
+func TestDebugLocalBindRequiresToken(t *testing.T) {
+	store, _ := db.Open(filepath.Join(t.TempDir(), "bot.db"))
+	mgr := session.NewManager(store, mockengine.New(), feishu.NewMockSender(), session.Options{WorkspaceMode: "work"})
+	cfg := config.Config{Server: config.ServerConfig{DebugEnabled: true, DebugBind: "127.0.0.1", DebugToken: "test-token", MaxBodyBytes: 1024}, Apps: []config.AppConfig{{ID: "demo"}}}
+	srv := debugapi.New(cfg, map[string]*session.Manager{"demo": mgr})
+
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/debug/dispatch", bytes.NewBufferString(`{"app_id":"demo"}`)))
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("missing local token status = %d", rec.Code)
+	}
+}
+
 func TestDebugApprovalRespondRequiresPendingSameAppAndKnownDecision(t *testing.T) {
 	store, _ := db.Open(filepath.Join(t.TempDir(), "bot.db"))
 	if err := store.Approvals().Save(model.ApprovalRequest{ID: "a1", AppID: "demo", Status: "user_allowed"}); err != nil {
 		t.Fatal(err)
 	}
-	cfg := config.Config{Server: config.ServerConfig{DebugEnabled: true, MaxBodyBytes: 1024}, Apps: []config.AppConfig{{ID: "demo"}}}
+	cfg := config.Config{Server: config.ServerConfig{DebugEnabled: true, DebugToken: "test-token", MaxBodyBytes: 1024}, Apps: []config.AppConfig{{ID: "demo"}}}
 	srv := debugapi.NewWithServices(cfg, debugapi.Services{Stores: map[string]*db.Store{"demo": store}})
 
 	for _, body := range []string{
@@ -202,7 +244,9 @@ func TestDebugApprovalRespondRequiresPendingSameAppAndKnownDecision(t *testing.T
 		`{"app_id":"demo","approval_id":"a1","decision":"{\"raw\":true}"}`,
 	} {
 		rec := httptest.NewRecorder()
-		srv.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/debug/approval/respond", bytes.NewBufferString(body)))
+		req := httptest.NewRequest(http.MethodPost, "/debug/approval/respond", bytes.NewBufferString(body))
+		req.Header.Set("X-Debug-Token", "test-token")
+		srv.ServeHTTP(rec, req)
 		if rec.Code != http.StatusBadRequest && rec.Code != http.StatusConflict {
 			t.Fatalf("body %s status = %d response=%s", body, rec.Code, rec.Body.String())
 		}

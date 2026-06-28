@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/kid0317/codex-workspace-bot/internal/db"
+	"github.com/kid0317/codex-workspace-bot/internal/engine"
 	"github.com/kid0317/codex-workspace-bot/internal/feishu"
 	"github.com/kid0317/codex-workspace-bot/internal/mockengine"
 	"github.com/kid0317/codex-workspace-bot/internal/model"
@@ -40,6 +41,45 @@ func TestSystemTaskWritesContextWithoutCreatingChannelSession(t *testing.T) {
 	}
 }
 
+func TestSystemTaskFailedEngineDoesNotUpdateLastRunAt(t *testing.T) {
+	root := t.TempDir()
+	store, _ := db.Open(filepath.Join(root, "bot.db"))
+	loaded := mustLoadTask(t, root, "system-fail.yaml", `
+name: System Fail
+enabled: true
+cron: "0 * * * *"
+send_output: false
+prompt: maintain
+`, "demo")
+	runner := task.NewRunner(store, &taskEventEngine{events: []engine.TurnEvent{
+		{Type: engine.EventTurnStarted, ThreadID: "thread-system"},
+		{Type: engine.EventFailed, ThreadID: "thread-system", Error: "mock failure"},
+	}}, root)
+	if err := runner.Run(context.Background(), loaded); err == nil {
+		t.Fatal("system task should return engine terminal failure")
+	}
+	assertTaskLastRunAtNil(t, store, loaded.ID)
+}
+
+func TestSystemTaskMalformedEngineEventsDoNotUpdateLastRunAt(t *testing.T) {
+	root := t.TempDir()
+	store, _ := db.Open(filepath.Join(root, "bot.db"))
+	loaded := mustLoadTask(t, root, "system-malformed.yaml", `
+name: System Malformed
+enabled: true
+cron: "0 * * * *"
+send_output: false
+prompt: maintain
+`, "demo")
+	runner := task.NewRunner(store, &taskEventEngine{events: []engine.TurnEvent{
+		{Type: engine.EventTurnStarted, ThreadID: "thread-system"},
+	}}, root)
+	if err := runner.Run(context.Background(), loaded); err == nil {
+		t.Fatal("system task should reject stream without terminal event")
+	}
+	assertTaskLastRunAtNil(t, store, loaded.ID)
+}
+
 func TestUserFacingTaskRoutesThroughTargetChannel(t *testing.T) {
 	root := t.TempDir()
 	store, _ := db.Open(filepath.Join(root, "bot.db"))
@@ -63,6 +103,49 @@ prompt: say hi
 	}
 	if !sender.HasCallSequence("SendThinking", "UpdateCard") {
 		t.Fatalf("sender calls = %#v", sender.Calls())
+	}
+}
+
+func TestUserFacingTaskRunsRepeatedlyWithoutMessageDedup(t *testing.T) {
+	root := t.TempDir()
+	store, _ := db.Open(filepath.Join(root, "bot.db"))
+	sender := feishu.NewMockSender()
+	manager := session.NewManager(store, mockengine.New(), sender, session.Options{WorkspaceMode: "work", WorkspaceDir: root})
+	runner := task.NewRunnerWithManagers(store, mockengine.New(), root, map[string]*session.Manager{"demo": manager})
+	loaded := mustLoadTask(t, root, "repeat.yaml", `
+name: Repeat Task
+cron: "0 * * * *"
+target_type: p2p
+target_id: ou_user
+send_output: true
+prompt: say hi
+`, "demo")
+	if err := runner.Run(context.Background(), loaded); err != nil {
+		t.Fatal(err)
+	}
+	if err := runner.Run(context.Background(), loaded); err != nil {
+		t.Fatal(err)
+	}
+	messages, _ := store.Messages().All()
+	if len(messages) != 4 {
+		t.Fatalf("repeated task runs wrote %d messages, want 4 user+assistant messages: %#v", len(messages), messages)
+	}
+}
+
+func TestUserFacingTaskWithoutManagerReturnsError(t *testing.T) {
+	root := t.TempDir()
+	store, _ := db.Open(filepath.Join(root, "bot.db"))
+	runner := task.NewRunnerWithManagers(store, mockengine.New(), root, map[string]*session.Manager{})
+	loaded := mustLoadTask(t, root, "missing-manager.yaml", `
+name: Missing Manager
+cron: "0 * * * *"
+target_type: p2p
+target_id: ou_user
+send_output: true
+prompt: say hi
+`, "demo")
+	if err := runner.Run(context.Background(), loaded); err == nil {
+		t.Fatal("user-facing task without a manager should return an error")
 	}
 }
 
@@ -108,4 +191,25 @@ func mustLoadTask(t *testing.T, root, name, body, appID string) model.Task {
 		t.Fatal(err)
 	}
 	return loaded
+}
+
+func assertTaskLastRunAtNil(t *testing.T, store *db.Store, id string) {
+	t.Helper()
+	tasks, err := store.Tasks().All()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, got := range tasks {
+		if got.ID == id && got.LastRunAt != nil {
+			t.Fatalf("task %s LastRunAt = %v, want nil", id, got.LastRunAt)
+		}
+	}
+}
+
+type taskEventEngine struct {
+	events []engine.TurnEvent
+}
+
+func (e *taskEventEngine) SendTurn(ctx context.Context, req engine.TurnRequest) (engine.EventStream, error) {
+	return engine.NewSliceStream(e.events), nil
 }

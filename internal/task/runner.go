@@ -2,10 +2,12 @@ package task
 
 import (
 	"context"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/kid0317/codex-workspace-bot/internal/db"
 	"github.com/kid0317/codex-workspace-bot/internal/engine"
 	"github.com/kid0317/codex-workspace-bot/internal/feishu"
@@ -58,10 +60,20 @@ func (r *Runner) runSystemTask(ctx context.Context, t model.Task) error {
 	if err != nil {
 		return err
 	}
+	var events []engine.TurnEvent
 	for stream.Next() {
+		events = append(events, stream.Event())
 	}
 	if err := stream.Err(); err != nil {
 		return err
+	}
+	if err := engine.ValidateEvents(events); err != nil {
+		return err
+	}
+	for _, ev := range events {
+		if ev.Type == engine.EventFailed || ev.Type == engine.EventInterrupted {
+			return fmt.Errorf("system task engine turn %s: %s", ev.Type, ev.Error)
+		}
 	}
 	now := time.Now()
 	t.LastRunAt = &now
@@ -72,7 +84,7 @@ func (r *Runner) runChannelTask(ctx context.Context, t model.Task, sendOutput bo
 	key := buildChannelKey(t)
 	manager := r.managers[t.AppID]
 	if manager == nil {
-		return nil
+		return fmt.Errorf("task manager not found for app %s", t.AppID)
 	}
 	msg := feishu.IncomingMessage{
 		AppID:          t.AppID,
@@ -80,9 +92,12 @@ func (r *Runner) runChannelTask(ctx context.Context, t model.Task, sendOutput bo
 		ChatID:         t.TargetID,
 		ChannelKey:     key,
 		SenderID:       t.CreatedBy,
-		MessageID:      "task:" + t.ID,
+		MessageID:      "task:" + t.ID + ":" + uuid.NewString(),
 		Prompt:         t.Prompt,
 		SuppressOutput: !sendOutput,
+		ForceNewThread: true,
+		TaskID:         t.ID,
+		TaskName:       t.Name,
 		ReceiveID:      t.TargetID,
 		ReceiveType:    receiveType(t.TargetType),
 	}

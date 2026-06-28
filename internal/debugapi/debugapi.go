@@ -1,10 +1,10 @@
 package debugapi
 
 import (
+	"crypto/subtle"
 	"encoding/json"
 	"net/http"
 	"strings"
-	"sync"
 
 	"github.com/kid0317/codex-workspace-bot/internal/config"
 	"github.com/kid0317/codex-workspace-bot/internal/db"
@@ -26,8 +26,6 @@ type Services struct {
 
 func NewWithServices(cfg config.Config, services Services) http.Handler {
 	mux := http.NewServeMux()
-	var scenarioMu sync.RWMutex
-	scenarios := map[string]string{}
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"status": "ok"})
 	})
@@ -62,11 +60,6 @@ func NewWithServices(cfg config.Config, services Services) http.Handler {
 		if req.ChatType == "" {
 			req.ChatType = "p2p"
 		}
-		if req.Scenario == "" {
-			scenarioMu.RLock()
-			req.Scenario = scenarios[req.AppID]
-			scenarioMu.RUnlock()
-		}
 		receiveID, receiveType := req.ChatID, "chat_id"
 		if req.ChatType == "p2p" {
 			receiveID, receiveType = req.SenderID, "open_id"
@@ -98,23 +91,7 @@ func NewWithServices(cfg config.Config, services Services) http.Handler {
 		if !requirePost(w, r) {
 			return
 		}
-		limitBody(w, r, cfg)
-		var req struct {
-			AppID    string `json:"app_id"`
-			Scenario string `json:"scenario"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.AppID == "" {
-			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid_body"})
-			return
-		}
-		if services.Managers[req.AppID] == nil {
-			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "unknown_app"})
-			return
-		}
-		scenarioMu.Lock()
-		scenarios[req.AppID] = req.Scenario
-		scenarioMu.Unlock()
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+		writeJSON(w, http.StatusGone, map[string]any{"error": "use_per_request_scenario"})
 	})
 	mux.HandleFunc("/debug/task/run", func(w http.ResponseWriter, r *http.Request) {
 		if !requireDebug(w, r, cfg) {
@@ -144,7 +121,7 @@ func NewWithServices(cfg config.Config, services Services) http.Handler {
 		if req.Task.AppID == "" {
 			req.Task.AppID = req.AppID
 		}
-		if req.Task.ID != "" && len(req.Task.ID) > len(req.AppID)+1 && req.Task.ID[:len(req.AppID)+1] != req.AppID+"/" {
+		if req.Task.ID != "" && !strings.HasPrefix(req.Task.ID, req.AppID+"/") {
 			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "cross_app_task_rejected"})
 			return
 		}
@@ -220,25 +197,26 @@ func requireDebug(w http.ResponseWriter, r *http.Request, cfg config.Config) boo
 		http.NotFound(w, r)
 		return false
 	}
-	if isNonLocalBind(cfg.Server.DebugBind) {
-		if cfg.Server.DebugToken == "" || !tokenMatches(r, cfg.Server.DebugToken) {
-			writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "debug_token_required"})
-			return false
-		}
+	if cfg.Server.DebugToken == "" || !tokenMatches(r, cfg.Server.DebugToken) {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "debug_token_required"})
+		return false
 	}
 	return true
 }
 
-func isNonLocalBind(bind string) bool {
-	return bind != "" && bind != "127.0.0.1" && bind != "localhost"
-}
-
 func tokenMatches(r *http.Request, token string) bool {
-	if r.Header.Get("X-Debug-Token") == token {
+	if constantTimeEqual(r.Header.Get("X-Debug-Token"), token) {
 		return true
 	}
 	auth := r.Header.Get("Authorization")
-	return strings.TrimPrefix(auth, "Bearer ") == token && strings.HasPrefix(auth, "Bearer ")
+	return strings.HasPrefix(auth, "Bearer ") && constantTimeEqual(strings.TrimPrefix(auth, "Bearer "), token)
+}
+
+func constantTimeEqual(got, want string) bool {
+	if got == "" || want == "" || len(got) != len(want) {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(got), []byte(want)) == 1
 }
 
 func limitBody(w http.ResponseWriter, r *http.Request, cfg config.Config) {

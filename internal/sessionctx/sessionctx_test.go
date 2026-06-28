@@ -6,7 +6,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/kid0317/codex-workspace-bot/internal/db"
 	"github.com/kid0317/codex-workspace-bot/internal/sessionctx"
+	"gopkg.in/yaml.v3"
 )
 
 func TestWriterCreatesInteractiveAndSystemContextFiles(t *testing.T) {
@@ -48,4 +50,52 @@ func TestWriterRejectsUnsafeSystemSlug(t *testing.T) {
 	if _, statErr := os.Stat(filepath.Join(root, "escape", "SESSION_CONTEXT.md")); !os.IsNotExist(statErr) {
 		t.Fatalf("unsafe context was created outside system dir: %v", statErr)
 	}
+}
+
+func TestChatHistoryFixtureCompatibility(t *testing.T) {
+	store, err := db.Open(copyDBFixture(t, "../../testdata/chat_history/bot.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	sessions, err := store.Sessions().ByChannel("p2p:oc_legacy:legacy-app")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sessions) == 0 {
+		t.Fatal("chat history fixture has no legacy p2p session")
+	}
+	contextData, err := os.ReadFile("../../testdata/chat_history/SESSION_CONTEXT.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(contextData), "channel_key: p2p:oc_legacy:legacy-app") {
+		t.Fatalf("fixture context missing channel key: %s", contextData)
+	}
+	var expected []struct {
+		Query             string `yaml:"query"`
+		ExpectedSessionID string `yaml:"expected_session_id"`
+	}
+	data, err := os.ReadFile("../../testdata/chat_history/expected_outputs.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := yaml.Unmarshal(data, &expected); err != nil {
+		t.Fatal(err)
+	}
+	if len(expected) == 0 || expected[0].ExpectedSessionID == "" {
+		t.Fatalf("expected outputs fixture = %#v", expected)
+	}
+}
+
+func copyDBFixture(t *testing.T, src string) string {
+	t.Helper()
+	data, err := os.ReadFile(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dst := filepath.Join(t.TempDir(), filepath.Base(src))
+	if err := os.WriteFile(dst, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return dst
 }

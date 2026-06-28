@@ -2,6 +2,7 @@ package session_test
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -93,9 +94,13 @@ func TestAttachmentPendingSurvivesManagerRestartAndIsConsumedByText(t *testing.T
 	store, _ := db.Open(path)
 	sender := feishu.NewMockSender()
 	engine := &recordingEngine{}
-	mgr := session.NewManager(store, engine, sender, session.Options{WorkspaceMode: "work", WorkspaceDir: root})
+	tempDir := filepath.Join(root, "tmp")
+	if err := os.MkdirAll(tempDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	mgr := session.NewManager(store, engine, sender, session.Options{WorkspaceMode: "work", WorkspaceDir: root, AttachmentTempDir: tempDir})
 	attMsg := incoming("m1", "")
-	tempFile := filepath.Join(t.TempDir(), "report.txt")
+	tempFile := filepath.Join(tempDir, "report.txt")
 	if err := os.WriteFile(tempFile, []byte("report"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -108,7 +113,7 @@ func TestAttachmentPendingSurvivesManagerRestartAndIsConsumedByText(t *testing.T
 		t.Fatalf("pending attachments = %#v err=%v", pending, err)
 	}
 	store, _ = db.Open(path)
-	mgr = session.NewManager(store, engine, sender, session.Options{WorkspaceMode: "work", WorkspaceDir: root})
+	mgr = session.NewManager(store, engine, sender, session.Options{WorkspaceMode: "work", WorkspaceDir: root, AttachmentTempDir: tempDir})
 	if err := mgr.Dispatch(context.Background(), incoming("m2", "use attachment")); err != nil {
 		t.Fatal(err)
 	}
@@ -131,10 +136,14 @@ func TestAttachmentConsumeRejectsUnsafeTempPathAndKeepsUniqueNames(t *testing.T)
 	root := t.TempDir()
 	store, _ := db.Open(filepath.Join(root, "bot.db"))
 	sender := feishu.NewMockSender()
-	mgr := session.NewManager(store, mockengine.New(), sender, session.Options{WorkspaceMode: "work", WorkspaceDir: root})
+	tempDir := filepath.Join(root, "tmp")
+	if err := os.MkdirAll(tempDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	mgr := session.NewManager(store, mockengine.New(), sender, session.Options{WorkspaceMode: "work", WorkspaceDir: root, AttachmentTempDir: tempDir})
 	msg := incoming("m1", "")
-	safe1 := filepath.Join(t.TempDir(), "report.txt")
-	safe2 := filepath.Join(t.TempDir(), "report-copy.txt")
+	safe1 := filepath.Join(tempDir, "report.txt")
+	safe2 := filepath.Join(tempDir, "report-copy.txt")
 	if err := os.WriteFile(safe1, []byte("one"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -158,11 +167,95 @@ func TestAttachmentConsumeRejectsUnsafeTempPathAndKeepsUniqueNames(t *testing.T)
 
 	unsafeMsg := incoming("m3", "")
 	unsafeMsg.Attachments = []feishu.Attachment{{ID: "a3", OriginalName: "bad.txt", TempPath: filepath.Join(root, "..", "outside.txt")}}
-	if err := mgr.Dispatch(context.Background(), unsafeMsg); err != nil {
+	if err := mgr.Dispatch(context.Background(), unsafeMsg); err == nil {
+		t.Fatal("unsafe temp path should be rejected")
+	}
+}
+
+func TestAttachmentConsumeRejectsAbsolutePathOutsideWorkspace(t *testing.T) {
+	root := t.TempDir()
+	store, _ := db.Open(filepath.Join(root, "bot.db"))
+	sender := feishu.NewMockSender()
+	mgr := session.NewManager(store, mockengine.New(), sender, session.Options{WorkspaceMode: "work", WorkspaceDir: root})
+
+	outside := filepath.Join(t.TempDir(), "secret.txt")
+	if err := os.WriteFile(outside, []byte("secret"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := mgr.Dispatch(context.Background(), incoming("m4", "use unsafe")); err == nil {
-		t.Fatal("unsafe temp path should be rejected")
+	msg := incoming("m1", "")
+	msg.Attachments = []feishu.Attachment{{ID: "a1", OriginalName: "secret.txt", TempPath: outside}}
+	if err := mgr.Dispatch(context.Background(), msg); err == nil {
+		t.Fatal("absolute temp path outside workspace should be rejected")
+	}
+}
+
+func TestAttachmentConsumeRequiresConfiguredTempRoot(t *testing.T) {
+	root := t.TempDir()
+	store, _ := db.Open(filepath.Join(root, "bot.db"))
+	sender := feishu.NewMockSender()
+	mgr := session.NewManager(store, mockengine.New(), sender, session.Options{WorkspaceMode: "work", WorkspaceDir: root})
+
+	secret := filepath.Join(root, "secret.txt")
+	if err := os.WriteFile(secret, []byte("secret"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	msg := incoming("m1", "")
+	msg.Attachments = []feishu.Attachment{{ID: "a1", OriginalName: "secret.txt", TempPath: secret}}
+	if err := mgr.Dispatch(context.Background(), msg); err == nil {
+		t.Fatal("attachment temp path under workspace should be rejected when AttachmentTempDir is unset")
+	}
+}
+
+func TestAttachmentConsumeRejectsRelativeTempPath(t *testing.T) {
+	root := t.TempDir()
+	store, _ := db.Open(filepath.Join(root, "bot.db"))
+	sender := feishu.NewMockSender()
+	mgr := session.NewManager(store, mockengine.New(), sender, session.Options{WorkspaceMode: "work", WorkspaceDir: root})
+
+	msg := incoming("m1", "")
+	msg.Attachments = []feishu.Attachment{{ID: "a1", OriginalName: "session.go", TempPath: "session.go"}}
+	if err := mgr.Dispatch(context.Background(), msg); err == nil {
+		t.Fatal("relative temp path should be rejected")
+	}
+}
+
+func TestAttachmentConsumeRejectsIntermediateSymlinkEscape(t *testing.T) {
+	root := t.TempDir()
+	tempDir := filepath.Join(root, "tmp")
+	outside := t.TempDir()
+	if err := os.MkdirAll(tempDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(outside, "secret.txt"), []byte("secret"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(tempDir, "link")); err != nil {
+		t.Fatal(err)
+	}
+	store, _ := db.Open(filepath.Join(root, "bot.db"))
+	sender := feishu.NewMockSender()
+	mgr := session.NewManager(store, mockengine.New(), sender, session.Options{WorkspaceMode: "work", WorkspaceDir: root, AttachmentTempDir: tempDir})
+
+	msg := incoming("m1", "")
+	msg.Attachments = []feishu.Attachment{{ID: "a1", OriginalName: "secret.txt", TempPath: filepath.Join(tempDir, "link", "secret.txt")}}
+	if err := mgr.Dispatch(context.Background(), msg); err == nil {
+		t.Fatal("intermediate symlink escape should be rejected")
+	}
+}
+
+func TestAttachmentPendingLimitRejectsTooManyAttachments(t *testing.T) {
+	root := t.TempDir()
+	store, _ := db.Open(filepath.Join(root, "bot.db"))
+	sender := feishu.NewMockSender()
+	mgr := session.NewManager(store, mockengine.New(), sender, session.Options{WorkspaceMode: "work", WorkspaceDir: root, MaxPendingAttachments: 1})
+
+	msg := incoming("m1", "")
+	msg.Attachments = []feishu.Attachment{
+		{ID: "a1", OriginalName: "one.txt"},
+		{ID: "a2", OriginalName: "two.txt"},
+	}
+	if err := mgr.Dispatch(context.Background(), msg); err == nil {
+		t.Fatal("too many pending attachments should be rejected")
 	}
 }
 
@@ -192,6 +285,67 @@ func TestDuplicateMessageIDIsIdempotent(t *testing.T) {
 	}
 }
 
+func TestDuplicateReceiptExpiresAfterConfiguredTTL(t *testing.T) {
+	store, _ := db.Open(filepath.Join(t.TempDir(), "bot.db"))
+	if err := store.EventReceipts().Save("expired-message", "demo"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.EventReceipts().SetCreatedAtForTest("expired-message", time.Now().Add(-2*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	sender := feishu.NewMockSender()
+	mgr := session.NewManager(store, mockengine.New(), sender, session.Options{WorkspaceMode: "work", DuplicateMessageTTL: time.Hour})
+	if err := mgr.Dispatch(context.Background(), incoming("expired-message", "after ttl")); err != nil {
+		t.Fatal(err)
+	}
+	messages, err := store.Messages().All()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(messages) != 2 {
+		t.Fatalf("expired receipt should allow processing, got %#v", messages)
+	}
+}
+
+func TestDuplicateAttachmentOnlyAndNewEventsAreIdempotent(t *testing.T) {
+	store, _ := db.Open(filepath.Join(t.TempDir(), "bot.db"))
+	sender := feishu.NewMockSender()
+	mgr := session.NewManager(store, mockengine.New(), sender, session.Options{WorkspaceMode: "work"})
+
+	att := incoming("dup-attachment", "")
+	att.Attachments = []feishu.Attachment{{ID: "a1", OriginalName: "a.txt"}}
+	if err := mgr.Dispatch(context.Background(), att); err != nil {
+		t.Fatal(err)
+	}
+	if err := mgr.Dispatch(context.Background(), att); err != nil {
+		t.Fatal(err)
+	}
+	pending, _ := store.Attachments().ByChannelState(att.ChannelKey, model.AttachmentPending)
+	if len(pending) != 1 {
+		t.Fatalf("duplicate attachment-only dispatch wrote %#v", pending)
+	}
+
+	newMsg := incoming("dup-new", "/new")
+	if err := mgr.Dispatch(context.Background(), incoming("before-new", "hello")); err != nil {
+		t.Fatal(err)
+	}
+	if err := mgr.Dispatch(context.Background(), newMsg); err != nil {
+		t.Fatal(err)
+	}
+	if err := mgr.Dispatch(context.Background(), newMsg); err != nil {
+		t.Fatal(err)
+	}
+	var newReceipts int
+	for _, call := range sender.Calls() {
+		if call.Method == "SendText" && strings.Contains(call.Text, "新对话") {
+			newReceipts++
+		}
+	}
+	if newReceipts != 1 {
+		t.Fatalf("duplicate /new sent %d receipts, calls=%#v", newReceipts, sender.Calls())
+	}
+}
+
 func TestCleanupExpiresPendingAttachments(t *testing.T) {
 	store, _ := db.Open(filepath.Join(t.TempDir(), "bot.db"))
 	sender := feishu.NewMockSender()
@@ -207,6 +361,90 @@ func TestCleanupExpiresPendingAttachments(t *testing.T) {
 	expired, err := store.Attachments().ByChannelState(msg.ChannelKey, model.AttachmentExpired)
 	if err != nil || len(expired) != 1 {
 		t.Fatalf("expired attachments = %#v err=%v", expired, err)
+	}
+}
+
+func TestCleanupExpiredAttachmentsRespectsTTLAndDeletesFiles(t *testing.T) {
+	root := t.TempDir()
+	store, _ := db.Open(filepath.Join(root, "bot.db"))
+	oldFile := filepath.Join(root, "old.tmp")
+	newFile := filepath.Join(root, "new.tmp")
+	if err := os.WriteFile(oldFile, []byte("old"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(newFile, []byte("new"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-2 * time.Hour)
+	recent := time.Now()
+	if err := store.Attachments().Save(model.Attachment{ID: "old", AppID: "demo", ChannelKey: "p2p:oc_p2p:demo", State: model.AttachmentPending, TempPath: oldFile, CreatedAt: old}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Attachments().Save(model.Attachment{ID: "new", AppID: "demo", ChannelKey: "p2p:oc_p2p:demo", State: model.AttachmentPending, TempPath: newFile, CreatedAt: recent}); err != nil {
+		t.Fatal(err)
+	}
+	if err := session.CleanupExpiredAttachments(store, "p2p:oc_p2p:demo", 3600); err != nil {
+		t.Fatal(err)
+	}
+	expired, _ := store.Attachments().ByChannelState("p2p:oc_p2p:demo", model.AttachmentExpired)
+	if len(expired) != 1 || expired[0].ID != "old" {
+		t.Fatalf("expired attachments = %#v", expired)
+	}
+	pending, _ := store.Attachments().ByChannelState("p2p:oc_p2p:demo", model.AttachmentPending)
+	if len(pending) != 1 || pending[0].ID != "new" {
+		t.Fatalf("pending attachments = %#v", pending)
+	}
+	if _, err := os.Stat(oldFile); !os.IsNotExist(err) {
+		t.Fatalf("old temp file still exists or unexpected error: %v", err)
+	}
+	if _, err := os.Stat(newFile); err != nil {
+		t.Fatalf("new temp file should remain: %v", err)
+	}
+}
+
+func TestCleanupExpiredAttachmentsDoesNotDeleteOutsideRoots(t *testing.T) {
+	root := t.TempDir()
+	store, _ := db.Open(filepath.Join(root, "bot.db"))
+	outside := filepath.Join(t.TempDir(), "outside.txt")
+	if err := os.WriteFile(outside, []byte("outside"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Attachments().Save(model.Attachment{ID: "outside", AppID: "demo", ChannelKey: "p2p:oc_p2p:demo", State: model.AttachmentPending, TempPath: outside, CreatedAt: time.Now().Add(-2 * time.Hour)}); err != nil {
+		t.Fatal(err)
+	}
+	if err := session.CleanupExpiredAttachments(store, "p2p:oc_p2p:demo", 3600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(outside); err != nil {
+		t.Fatalf("cleanup should not delete outside path: %v", err)
+	}
+}
+
+func TestExpiredPendingAttachmentIsNotConsumedIntoPrompt(t *testing.T) {
+	root := t.TempDir()
+	tempDir := filepath.Join(root, "tmp")
+	if err := os.MkdirAll(tempDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	oldFile := filepath.Join(tempDir, "old.txt")
+	if err := os.WriteFile(oldFile, []byte("old"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	store, _ := db.Open(filepath.Join(root, "bot.db"))
+	if err := store.Attachments().Save(model.Attachment{ID: "old", AppID: "demo", ChannelKey: "p2p:oc_p2p:demo", State: model.AttachmentPending, OriginalName: "old.txt", TempPath: oldFile, CreatedAt: time.Now().Add(-2 * time.Hour)}); err != nil {
+		t.Fatal(err)
+	}
+	engine := &recordingEngine{}
+	mgr := session.NewManager(store, engine, feishu.NewMockSender(), session.Options{WorkspaceMode: "work", WorkspaceDir: root, AttachmentTempDir: tempDir, PendingAttachmentTTL: time.Hour})
+	if err := mgr.Dispatch(context.Background(), incoming("m2", "use current prompt")); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(engine.prompt, "old.txt") {
+		t.Fatalf("expired attachment was consumed into prompt: %q", engine.prompt)
+	}
+	expired, _ := store.Attachments().ByChannelState("p2p:oc_p2p:demo", model.AttachmentExpired)
+	if len(expired) != 1 {
+		t.Fatalf("expired attachments = %#v", expired)
 	}
 }
 
@@ -252,10 +490,12 @@ func TestChannelWorkerSerializesSameChannelAndRejectsOverflow(t *testing.T) {
 	store, _ := db.Open(filepath.Join(t.TempDir(), "bot.db"))
 	sender := feishu.NewMockSender()
 	engine := newBlockingEngine()
+	emitter := &recordingEmitter{}
 	mgr := session.NewManager(store, engine, sender, session.Options{
 		WorkspaceMode:     "work",
 		QueueSize:         1,
 		WorkerIdleTimeout: time.Second,
+		Emitter:           emitter,
 	})
 	defer mgr.Close(context.Background())
 
@@ -300,6 +540,15 @@ func TestChannelWorkerSerializesSameChannelAndRejectsOverflow(t *testing.T) {
 	}
 	if !busyText {
 		t.Fatalf("overflow did not send busy response: %#v", sender.Calls())
+	}
+	var rejectedEvent bool
+	for _, ev := range emitter.events {
+		if ev.EventType == observability.EventDispatchRejected && ev.ErrorKind == "queue_overflow" {
+			rejectedEvent = true
+		}
+	}
+	if !rejectedEvent {
+		t.Fatalf("overflow did not emit dispatch_rejected: %#v", emitter.events)
 	}
 }
 
@@ -360,8 +609,8 @@ func TestDispatchPersistsApprovalRequestFromEngineEvent(t *testing.T) {
 		{Type: engine.EventDelta, ThreadID: "thread-1", Text: "waiting"},
 		{Type: engine.EventCompleted, ThreadID: "thread-1"},
 	}}, sender, session.Options{WorkspaceMode: "work"})
-	if err := mgr.Dispatch(context.Background(), incoming("m1", "needs approval")); err != nil {
-		t.Fatal(err)
+	if err := mgr.Dispatch(context.Background(), incoming("m1", "needs approval")); err == nil {
+		t.Fatal("pending approval should stop dispatch before output is sent")
 	}
 	req, err := store.Approvals().ByID("approval-1")
 	if err != nil {
@@ -369,6 +618,104 @@ func TestDispatchPersistsApprovalRequestFromEngineEvent(t *testing.T) {
 	}
 	if req.AppID != "demo" || req.Status != "pending_user" || req.RequestJSON == "" {
 		t.Fatalf("approval request = %#v", req)
+	}
+	messages, _ := store.Messages().All()
+	if len(messages) != 1 || messages[0].Role != model.MessageRoleUser {
+		t.Fatalf("approval path should only persist user message before approval: %#v", messages)
+	}
+	if len(sender.Calls()) != 1 || sender.Calls()[0].Method != "SendThinking" {
+		t.Fatalf("approval path should not send final assistant output: %#v", sender.Calls())
+	}
+}
+
+func TestApprovalRequestTerminalFailureStillStaysPending(t *testing.T) {
+	store, _ := db.Open(filepath.Join(t.TempDir(), "bot.db"))
+	sender := feishu.NewMockSender()
+	mgr := session.NewManager(store, &eventEngine{events: []engine.TurnEvent{
+		{Type: engine.EventTurnStarted, ThreadID: "thread-1"},
+		{Type: engine.EventApprovalRequested, ThreadID: "thread-1", ApprovalID: "approval-1", ApprovalJSON: `{"tool":"write"}`},
+		{Type: engine.EventFailed, ThreadID: "thread-1", Error: "approval required"},
+	}}, sender, session.Options{WorkspaceMode: "work"})
+	if err := mgr.Dispatch(context.Background(), incoming("m1", "needs approval")); err == nil {
+		t.Fatal("pending approval should stop dispatch")
+	}
+	turns, _ := store.Turns().All()
+	if len(turns) != 1 || turns[0].Status != "pending_approval" {
+		t.Fatalf("turns = %#v", turns)
+	}
+	if len(sender.Calls()) != 1 || sender.Calls()[0].Method != "SendThinking" {
+		t.Fatalf("approval terminal failure should not send final output: %#v", sender.Calls())
+	}
+}
+
+func TestExpiredApprovalIsResolvedBeforeNextDispatch(t *testing.T) {
+	store, _ := db.Open(filepath.Join(t.TempDir(), "bot.db"))
+	sender := feishu.NewMockSender()
+	mgr := session.NewManager(store, mockengine.New(), sender, session.Options{WorkspaceMode: "work"})
+	if err := store.Approvals().Save(model.ApprovalRequest{
+		ID: "approval-old", AppID: "demo", ChannelKey: "p2p:oc_p2p:demo", Status: "pending_user", ExpiresAt: time.Now().Add(-time.Second),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := mgr.Dispatch(context.Background(), incoming("m1", "after approval")); err != nil {
+		t.Fatal(err)
+	}
+	got, err := store.Approvals().ByID("approval-old")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != "expired" || got.ResolvedAt == nil {
+		t.Fatalf("expired approval = %#v", got)
+	}
+}
+
+func TestEngineFailurePreservesErrorKindAndUpdatesWorkCard(t *testing.T) {
+	store, _ := db.Open(filepath.Join(t.TempDir(), "bot.db"))
+	sender := feishu.NewMockSender()
+	mgr := session.NewManager(store, &eventEngine{events: []engine.TurnEvent{
+		{Type: engine.EventTurnStarted, ThreadID: "thread-1"},
+		{Type: engine.EventFailed, ThreadID: "thread-1", Error: "engine_failed"},
+	}}, sender, session.Options{WorkspaceMode: "work"})
+	if err := mgr.Dispatch(context.Background(), incoming("m1", "fail")); err == nil {
+		t.Fatal("engine failure should return error")
+	}
+	turns, _ := store.Turns().All()
+	if len(turns) != 1 || turns[0].Status != string(engine.EventFailed) || turns[0].ErrorKind != "engine_failed" {
+		t.Fatalf("turns = %#v", turns)
+	}
+	if !sender.HasCallSequence("SendThinking", "UpdateCard") {
+		t.Fatalf("failure should update thinking card, calls=%#v", sender.Calls())
+	}
+}
+
+func TestSendFailureFallbackAndCompanionSegmentContinuation(t *testing.T) {
+	store, _ := db.Open(filepath.Join(t.TempDir(), "bot.db"))
+	workSender := feishu.NewMockSender()
+	workSender.FailNext("SendThinking", errors.New("card unavailable"))
+	mgr := session.NewManager(store, &eventEngine{events: []engine.TurnEvent{
+		{Type: engine.EventTurnStarted, ThreadID: "thread-1"},
+		{Type: engine.EventDelta, ThreadID: "thread-1", Text: "ok"},
+		{Type: engine.EventCompleted, ThreadID: "thread-1"},
+	}}, workSender, session.Options{WorkspaceMode: "work"})
+	if err := mgr.Dispatch(context.Background(), incoming("m1", "hello")); err != nil {
+		t.Fatal(err)
+	}
+	if !workSender.HasCallSequence("SendThinking", "SendText") {
+		t.Fatalf("work fallback calls = %#v", workSender.Calls())
+	}
+
+	companionSender := feishu.NewMockSender()
+	companionSender.FailNext("SendText", errors.New("segment failed"))
+	companion := session.NewManager(store, &eventEngine{events: []engine.TurnEvent{
+		{Type: engine.EventTurnStarted, ThreadID: "thread-2"},
+		{Type: engine.EventDelta, ThreadID: "thread-2", Text: "one[[SEND]]two"},
+		{Type: engine.EventCompleted, ThreadID: "thread-2"},
+	}}, companionSender, session.Options{WorkspaceMode: "companion"})
+	if err := companion.Dispatch(context.Background(), incoming("m2", "segment")); err != nil {
+		t.Fatal(err)
+	}
+	if len(companionSender.Calls()) != 2 {
+		t.Fatalf("companion should continue after one segment failure, calls=%#v", companionSender.Calls())
 	}
 }
 
@@ -389,6 +736,31 @@ func TestDispatchEmitsTurnLifecycleEvents(t *testing.T) {
 	last := emitter.events[len(emitter.events)-1]
 	if last.EventType != observability.EventTurnCompleted || last.AppID != "demo" || last.ChannelKey == "" || last.MessageID != "m1" || last.TurnID == "" {
 		t.Fatalf("completed event = %#v", last)
+	}
+}
+
+func TestManagerCloseCancelsActiveTurn(t *testing.T) {
+	store, _ := db.Open(filepath.Join(t.TempDir(), "bot.db"))
+	sender := feishu.NewMockSender()
+	engine := newBlockingEngine()
+	mgr := session.NewManager(store, engine, sender, session.Options{WorkspaceMode: "work"})
+	done := make(chan error, 1)
+	go func() {
+		done <- mgr.Dispatch(context.Background(), incoming("m1", "slow"))
+	}()
+	engine.waitEntered(t, 1)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := mgr.Close(ctx); err != nil {
+		t.Fatalf("Close() should cancel active turn before timeout: %v", err)
+	}
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("dispatch should return cancellation error")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("dispatch did not return after manager close")
 	}
 }
 

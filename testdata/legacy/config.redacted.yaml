@@ -1,6 +1,7 @@
 server:
   port: 8080
   debug_enabled: true
+  debug_token: REDACTED_DEBUG_TOKEN
 engine:
   type: mock
 claude:

@@ -25,8 +25,9 @@ type SenderCall struct {
 }
 
 type MockSender struct {
-	mu    sync.Mutex
-	calls []SenderCall
+	mu       sync.Mutex
+	calls    []SenderCall
+	failures map[string][]error
 }
 
 func NewMockSender() *MockSender {
@@ -37,6 +38,9 @@ func (s *MockSender) SendText(ctx context.Context, receiveID, receiveType, text 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.calls = append(s.calls, SenderCall{Method: "SendText", ReceiveID: receiveID, ReceiveType: receiveType, Text: text})
+	if err := s.popFailure("SendText"); err != nil {
+		return "", err
+	}
 	return fmt.Sprintf("msg-%d", len(s.calls)), nil
 }
 
@@ -44,6 +48,9 @@ func (s *MockSender) SendThinking(ctx context.Context, receiveID, receiveType st
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.calls = append(s.calls, SenderCall{Method: "SendThinking", ReceiveID: receiveID, ReceiveType: receiveType})
+	if err := s.popFailure("SendThinking"); err != nil {
+		return "", err
+	}
 	return fmt.Sprintf("card-%d", len(s.calls)), nil
 }
 
@@ -51,7 +58,28 @@ func (s *MockSender) UpdateCard(ctx context.Context, cardMessageID, text string)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.calls = append(s.calls, SenderCall{Method: "UpdateCard", ReceiveID: cardMessageID, Text: text})
+	if err := s.popFailure("UpdateCard"); err != nil {
+		return err
+	}
 	return nil
+}
+
+func (s *MockSender) FailNext(method string, err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.failures == nil {
+		s.failures = map[string][]error{}
+	}
+	s.failures[method] = append(s.failures[method], err)
+}
+
+func (s *MockSender) popFailure(method string) error {
+	if len(s.failures[method]) == 0 {
+		return nil
+	}
+	err := s.failures[method][0]
+	s.failures[method] = s.failures[method][1:]
+	return err
 }
 
 func (s *MockSender) Calls() []SenderCall {
@@ -112,6 +140,9 @@ type IncomingMessage struct {
 	Prompt         string
 	Scenario       string
 	SuppressOutput bool
+	ForceNewThread bool
+	TaskID         string
+	TaskName       string
 	Attachments    []Attachment
 	ReceiveID      string
 	ReceiveType    string
@@ -119,14 +150,14 @@ type IncomingMessage struct {
 }
 
 type EventFixture struct {
-	AppID       string
-	ChatType    string
-	ChatID      string
-	ThreadID    string
-	SenderID    string
-	MessageID   string
-	MessageType string
-	Content     string
+	AppID       string `json:"app_id"`
+	ChatType    string `json:"chat_type"`
+	ChatID      string `json:"chat_id"`
+	ThreadID    string `json:"thread_id"`
+	SenderID    string `json:"sender_id"`
+	MessageID   string `json:"message_id"`
+	MessageType string `json:"message_type"`
+	Content     string `json:"content"`
 }
 
 func Normalize(ev EventFixture) (IncomingMessage, error) {

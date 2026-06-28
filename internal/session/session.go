@@ -23,13 +23,18 @@ import (
 )
 
 type Options struct {
-	WorkspaceMode     string
-	WorkspaceDir      string
-	Guardrail         guardrail.Guardrail
-	QueueSize         int
-	WorkerIdleTimeout time.Duration
-	ApprovalTimeout   time.Duration
-	Emitter           observability.Emitter
+	WorkspaceMode         string
+	WorkspaceDir          string
+	Guardrail             guardrail.Guardrail
+	QueueSize             int
+	WorkerIdleTimeout     time.Duration
+	DuplicateMessageTTL   time.Duration
+	ApprovalTimeout       time.Duration
+	PendingAttachmentTTL  time.Duration
+	AttachmentTempDir     string
+	MaxPendingAttachments int
+	MaxAttachmentBytes    int64
+	Emitter               observability.Emitter
 }
 
 type Manager struct {
@@ -41,6 +46,8 @@ type Manager struct {
 	workers map[string]*channelWorker
 	closed  bool
 	wg      sync.WaitGroup
+	ctx     context.Context
+	cancel  context.CancelFunc
 }
 
 func NewManager(store *db.Store, eng engine.Engine, sender feishu.Sender, opts Options) *Manager {
@@ -56,25 +63,19 @@ func NewManager(store *db.Store, eng engine.Engine, sender feishu.Sender, opts O
 	if opts.Emitter == nil {
 		opts.Emitter = observability.NopEmitter{}
 	}
-	return &Manager{store: store, engine: eng, sender: sender, opts: opts, workers: map[string]*channelWorker{}}
+	ctx, cancel := context.WithCancel(context.Background())
+	return &Manager{store: store, engine: eng, sender: sender, opts: opts, workers: map[string]*channelWorker{}, ctx: ctx, cancel: cancel}
 }
 
 func (m *Manager) Dispatch(ctx context.Context, msg feishu.IncomingMessage) error {
 	if msg.ChannelKey == "" {
 		msg.ChannelKey = feishu.BuildChannelKey(msg.ChatType, msg.ChatID, msg.ThreadID, msg.AppID)
 	}
-	worker, err := m.workerFor(msg.ChannelKey)
-	if err != nil {
-		return err
-	}
 	result := make(chan error, 1)
 	job := dispatchJob{ctx: ctx, msg: msg, result: result}
-	select {
-	case worker.jobs <- job:
-	case <-ctx.Done():
-		return ctx.Err()
-	default:
-		return m.rejectOverflow(ctx, msg)
+	err := m.enqueue(ctx, msg.ChannelKey, job)
+	if err != nil {
+		return err
 	}
 	select {
 	case err := <-result:
@@ -91,6 +92,7 @@ func (m *Manager) Close(ctx context.Context) error {
 		return nil
 	}
 	m.closed = true
+	m.cancel()
 	for _, worker := range m.workers {
 		close(worker.stop)
 	}
@@ -108,24 +110,31 @@ func (m *Manager) Close(ctx context.Context) error {
 	}
 }
 
-func (m *Manager) workerFor(channelKey string) (*channelWorker, error) {
+func (m *Manager) enqueue(ctx context.Context, channelKey string, job dispatchJob) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.closed {
-		return nil, errors.New("session manager 已关闭")
+		return errors.New("session manager 已关闭")
 	}
-	if worker := m.workers[channelKey]; worker != nil {
-		return worker, nil
+	worker := m.workers[channelKey]
+	if worker == nil {
+		worker = &channelWorker{
+			channelKey: channelKey,
+			jobs:       make(chan dispatchJob, m.opts.QueueSize),
+			stop:       make(chan struct{}),
+		}
+		m.workers[channelKey] = worker
+		m.wg.Add(1)
+		go m.runWorker(worker)
 	}
-	worker := &channelWorker{
-		channelKey: channelKey,
-		jobs:       make(chan dispatchJob, m.opts.QueueSize),
-		stop:       make(chan struct{}),
+	select {
+	case worker.jobs <- job:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
+		return m.rejectOverflow(ctx, job.msg)
 	}
-	m.workers[channelKey] = worker
-	m.wg.Add(1)
-	go m.runWorker(worker)
-	return worker, nil
 }
 
 func (m *Manager) runWorker(worker *channelWorker) {
@@ -141,7 +150,9 @@ func (m *Manager) runWorker(worker *channelWorker) {
 				default:
 				}
 			}
-			job.result <- m.dispatchNow(job.ctx, job.msg)
+			ctx, cancel := m.jobContext(job.ctx)
+			job.result <- m.dispatchNow(ctx, job.msg)
+			cancel()
 			timer.Reset(m.opts.WorkerIdleTimeout)
 		case <-timer.C:
 			m.mu.Lock()
@@ -156,7 +167,9 @@ func (m *Manager) runWorker(worker *channelWorker) {
 			for {
 				select {
 				case job := <-worker.jobs:
-					job.result <- m.dispatchNow(job.ctx, job.msg)
+					ctx, cancel := m.jobContext(job.ctx)
+					job.result <- m.dispatchNow(ctx, job.msg)
+					cancel()
 				default:
 					return
 				}
@@ -165,8 +178,21 @@ func (m *Manager) runWorker(worker *channelWorker) {
 	}
 }
 
+func (m *Manager) jobContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	jobCtx, cancel := context.WithCancel(ctx)
+	go func() {
+		select {
+		case <-ctx.Done():
+		case <-m.ctx.Done():
+			cancel()
+		case <-jobCtx.Done():
+		}
+	}()
+	return jobCtx, cancel
+}
+
 func (m *Manager) rejectOverflow(ctx context.Context, msg feishu.IncomingMessage) error {
-	_ = m.store.Turns().Save(model.Turn{
+	turn := model.Turn{
 		ID:         uuid.NewString(),
 		AppID:      msg.AppID,
 		ChannelKey: msg.ChannelKey,
@@ -174,6 +200,16 @@ func (m *Manager) rejectOverflow(ctx context.Context, msg feishu.IncomingMessage
 		Prompt:     msg.Prompt,
 		ErrorKind:  "queue_overflow",
 		CreatedAt:  time.Now(),
+	}
+	_ = m.store.Turns().Save(turn)
+	m.emit(ctx, observability.Event{
+		AppID:      msg.AppID,
+		ChannelKey: msg.ChannelKey,
+		MessageID:  msg.MessageID,
+		TurnID:     turn.ID,
+		EventType:  observability.EventDispatchRejected,
+		ErrorKind:  "queue_overflow",
+		At:         time.Now(),
 	})
 	if !msg.SuppressOutput {
 		_, _ = m.sender.SendText(ctx, msg.ReceiveID, msg.ReceiveType, "当前频道仍在处理上一条消息，请稍后再试")
@@ -182,7 +218,17 @@ func (m *Manager) rejectOverflow(ctx context.Context, msg feishu.IncomingMessage
 }
 
 func (m *Manager) dispatchNow(ctx context.Context, msg feishu.IncomingMessage) error {
-	if seen, err := m.store.Messages().ExistsFeishuMessage(msg.MessageID); err != nil || seen {
+	if msg.AppID != "" {
+		if err := m.store.Approvals().ExpirePendingBefore(msg.AppID, time.Now()); err != nil {
+			return err
+		}
+	}
+	if m.opts.DuplicateMessageTTL > 0 {
+		if err := m.store.EventReceipts().PruneBefore(time.Now().Add(-m.opts.DuplicateMessageTTL)); err != nil {
+			return err
+		}
+	}
+	if seen, err := m.store.EventReceipts().Seen(msg.MessageID); err != nil || seen {
 		return err
 	}
 	if err := m.opts.Guardrail.CheckInput(msg.Prompt, msg.ChatID); err != nil {
@@ -195,6 +241,9 @@ func (m *Manager) dispatchNow(ctx context.Context, msg feishu.IncomingMessage) e
 		return m.recordPendingAttachment(ctx, msg)
 	}
 	if strings.TrimSpace(msg.Prompt) == "/new" {
+		if err := m.recordEventReceipt(msg); err != nil {
+			return err
+		}
 		if err := m.store.Sessions().ArchiveActive(msg.ChannelKey); err != nil {
 			return err
 		}
@@ -215,8 +264,11 @@ func (m *Manager) dispatchNow(ctx context.Context, msg feishu.IncomingMessage) e
 	if err := m.store.Messages().Save(model.Message{ID: uuid.NewString(), SessionID: sess.ID, SenderID: msg.SenderID, Role: model.MessageRoleUser, Content: mergedPrompt, FeishuMsgID: msg.MessageID, CreatedAt: time.Now()}); err != nil {
 		return err
 	}
+	if err := m.recordEventReceipt(msg); err != nil {
+		return err
+	}
 	startedAt := time.Now()
-	m.emit(ctx, observability.Event{AppID: msg.AppID, ChannelKey: msg.ChannelKey, SessionID: sess.ID, MessageID: msg.MessageID, EventType: observability.EventTurnStarted, At: startedAt})
+	m.emit(ctx, observability.Event{AppID: msg.AppID, ChannelKey: msg.ChannelKey, SessionID: sess.ID, MessageID: msg.MessageID, TaskID: msg.TaskID, EventType: observability.EventTurnStarted, At: startedAt})
 	enginePrompt := mergedPrompt
 	if m.opts.WorkspaceDir != "" {
 		writer := sessionctx.Writer{WorkspaceDir: m.opts.WorkspaceDir}
@@ -232,6 +284,8 @@ func (m *Manager) dispatchNow(ctx context.Context, msg feishu.IncomingMessage) e
 			ReceiveType:    msg.ReceiveType,
 			SenderID:       msg.SenderID,
 			MessageID:      msg.MessageID,
+			TaskID:         msg.TaskID,
+			TaskName:       msg.TaskName,
 			EngineThreadID: sess.EngineThreadID,
 		}
 		if _, err := writer.Write(context); err != nil {
@@ -241,13 +295,16 @@ func (m *Manager) dispatchNow(ctx context.Context, msg feishu.IncomingMessage) e
 	}
 	policy := engine.ThreadResumeExisting
 	threadID := sess.EngineThreadID
-	if m.opts.WorkspaceMode == "companion" {
+	if m.opts.WorkspaceMode == "companion" || msg.ForceNewThread {
 		policy = engine.ThreadForceNew
 		threadID = ""
 	}
 	var cardID string
+	cardReady := false
 	if m.opts.WorkspaceMode == "work" && !msg.SuppressOutput {
-		cardID, _ = m.sender.SendThinking(ctx, msg.ReceiveID, msg.ReceiveType)
+		var err error
+		cardID, err = m.sender.SendThinking(ctx, msg.ReceiveID, msg.ReceiveType)
+		cardReady = err == nil && cardID != ""
 	}
 	stream, err := m.engine.SendTurn(ctx, engine.TurnRequest{Prompt: enginePrompt, Scenario: msg.Scenario, ThreadID: threadID, ThreadPolicy: policy})
 	if err != nil {
@@ -261,6 +318,28 @@ func (m *Manager) dispatchNow(ctx context.Context, msg feishu.IncomingMessage) e
 		if err := m.store.Approvals().Save(req); err != nil {
 			return err
 		}
+	}
+	if turn.Status == "pending_approval" {
+		turn.Output = ""
+		if err := m.store.Turns().Save(turn); err != nil {
+			return err
+		}
+		return fmt.Errorf("turn pending approval")
+	}
+	if turn.Status != "completed" {
+		turn.Output = final
+		if err := m.store.Turns().Save(turn); err != nil {
+			return err
+		}
+		if !msg.SuppressOutput && m.opts.WorkspaceMode == "work" && cardReady {
+			_ = m.sender.UpdateCard(ctx, cardID, "执行失败: "+first(turn.ErrorKind, turn.Status))
+		}
+		m.emit(ctx, observability.Event{
+			AppID: msg.AppID, ChannelKey: msg.ChannelKey, SessionID: sess.ID, EngineThreadID: turn.EngineThreadID,
+			MessageID: msg.MessageID, TaskID: msg.TaskID, TurnID: turn.ID, EventType: observability.EventTurnFailed,
+			DurationMS: time.Since(startedAt).Milliseconds(), ErrorKind: turn.ErrorKind, At: time.Now(),
+		})
+		return fmt.Errorf("engine turn failed: %s", first(turn.ErrorKind, turn.Status))
 	}
 	if err := m.opts.Guardrail.CheckOutput(final); err != nil {
 		turn.Status = "failed"
@@ -289,6 +368,7 @@ func (m *Manager) dispatchNow(ctx context.Context, msg feishu.IncomingMessage) e
 		SessionID:      sess.ID,
 		EngineThreadID: turn.EngineThreadID,
 		MessageID:      msg.MessageID,
+		TaskID:         msg.TaskID,
 		TurnID:         turn.ID,
 		EventType:      eventType,
 		DurationMS:     time.Since(startedAt).Milliseconds(),
@@ -306,8 +386,16 @@ func (m *Manager) dispatchNow(ctx context.Context, msg feishu.IncomingMessage) e
 		return nil
 	}
 	if m.opts.WorkspaceMode == "work" {
-		if err := m.sender.UpdateCard(ctx, cardID, processed.StoredText); err != nil {
-			return err
+		if cardReady {
+			if err := m.sender.UpdateCard(ctx, cardID, processed.StoredText); err != nil {
+				if _, fallbackErr := m.sender.SendText(ctx, msg.ReceiveID, msg.ReceiveType, processed.StoredText); fallbackErr != nil {
+					return err
+				}
+			}
+		} else {
+			if _, err := m.sender.SendText(ctx, msg.ReceiveID, msg.ReceiveType, processed.StoredText); err != nil {
+				return err
+			}
 		}
 		if sess.EngineThreadID == "" {
 			if err := m.store.Sessions().SetEngineThreadID(sess.ID, turn.EngineThreadID); err != nil {
@@ -317,11 +405,20 @@ func (m *Manager) dispatchNow(ctx context.Context, msg feishu.IncomingMessage) e
 	} else {
 		for _, segment := range processed.Segments {
 			if _, err := m.sender.SendText(ctx, msg.ReceiveID, msg.ReceiveType, segment); err != nil {
-				return err
+				if strings.Contains(err.Error(), "99991400") {
+					if _, retryErr := m.sender.SendText(ctx, msg.ReceiveID, msg.ReceiveType, segment); retryErr == nil {
+						continue
+					}
+				}
+				continue
 			}
 		}
 	}
 	return m.store.Messages().Save(model.Message{ID: uuid.NewString(), SessionID: sess.ID, Role: model.MessageRoleAssistant, Content: processed.StoredText, CreatedAt: time.Now()})
+}
+
+func (m *Manager) recordEventReceipt(msg feishu.IncomingMessage) error {
+	return m.store.EventReceipts().Save(msg.MessageID, msg.AppID)
 }
 
 func (m *Manager) emit(ctx context.Context, ev observability.Event) {
@@ -332,16 +429,39 @@ func (m *Manager) emit(ctx context.Context, ev observability.Event) {
 }
 
 func (m *Manager) recordPendingAttachment(ctx context.Context, msg feishu.IncomingMessage) error {
-	for _, att := range msg.Attachments {
-		if err := m.store.Attachments().Save(model.Attachment{ID: first(att.ID, uuid.NewString()), AppID: msg.AppID, ChannelKey: msg.ChannelKey, State: model.AttachmentPending, OriginalName: att.OriginalName, TempPath: att.TempPath, CreatedAt: time.Now()}); err != nil {
+	if m.opts.MaxPendingAttachments > 0 {
+		existing, err := m.store.Attachments().CountByChannelState(msg.ChannelKey, model.AttachmentPending)
+		if err != nil {
 			return err
 		}
+		if existing+int64(len(msg.Attachments)) > int64(m.opts.MaxPendingAttachments) {
+			return fmt.Errorf("pending attachments limit exceeded")
+		}
+	}
+	for _, att := range msg.Attachments {
+		if unsafeTempPath(att.TempPath, m.opts.AttachmentTempDir) {
+			return fmt.Errorf("附件临时路径非法")
+		}
+		if m.opts.MaxAttachmentBytes > 0 && att.SizeBytes > m.opts.MaxAttachmentBytes {
+			return fmt.Errorf("attachment size limit exceeded")
+		}
+		if err := m.store.Attachments().Save(model.Attachment{ID: first(att.ID, uuid.NewString()), AppID: msg.AppID, ChannelKey: msg.ChannelKey, State: model.AttachmentPending, OriginalName: att.OriginalName, TempPath: att.TempPath, SourceMsgID: msg.MessageID, CreatedAt: time.Now()}); err != nil {
+			return err
+		}
+	}
+	if err := m.recordEventReceipt(msg); err != nil {
+		return err
 	}
 	_, err := m.sender.SendText(ctx, msg.ReceiveID, msg.ReceiveType, "文件已放好，直接告诉我怎么用")
 	return err
 }
 
 func (m *Manager) consumePendingIntoPrompt(msg feishu.IncomingMessage, sessionID string) (string, error) {
+	if m.opts.PendingAttachmentTTL > 0 {
+		if err := CleanupExpiredAttachmentsWithRoots(m.store, msg.ChannelKey, int(m.opts.PendingAttachmentTTL.Seconds()), m.opts.WorkspaceDir, m.opts.AttachmentTempDir); err != nil {
+			return "", err
+		}
+	}
 	pending, err := m.store.Attachments().ByChannelState(msg.ChannelKey, model.AttachmentPending)
 	if err != nil || len(pending) == 0 {
 		return msg.Prompt, err
@@ -354,8 +474,17 @@ func (m *Manager) consumePendingIntoPrompt(msg feishu.IncomingMessage, sessionID
 			if err := os.MkdirAll(dir, 0o755); err != nil {
 				return "", err
 			}
-			if unsafeTempPath(att.TempPath) {
+			if unsafeTempPath(att.TempPath, m.opts.AttachmentTempDir) {
 				return "", fmt.Errorf("附件临时路径非法")
+			}
+			if m.opts.MaxAttachmentBytes > 0 && att.TempPath != "" {
+				info, err := os.Stat(att.TempPath)
+				if err != nil {
+					return "", err
+				}
+				if info.Size() > m.opts.MaxAttachmentBytes {
+					return "", fmt.Errorf("attachment size limit exceeded")
+				}
 			}
 			// 同一条消息可能上传同名文件，使用附件 ID 前缀避免覆盖。
 			sessionPath = filepath.Join(dir, feishu.SanitizeFilename(att.ID)+"-"+feishu.SanitizeFilename(att.OriginalName))
@@ -373,16 +502,38 @@ func (m *Manager) consumePendingIntoPrompt(msg feishu.IncomingMessage, sessionID
 	return msg.Prompt + "\n" + strings.Join(refs, "\n"), nil
 }
 
-func unsafeTempPath(path string) bool {
+func unsafeTempPath(path string, roots ...string) bool {
 	if path == "" {
 		return false
 	}
-	for _, part := range strings.Split(filepath.ToSlash(path), "/") {
-		if part == ".." {
-			return true
+	clean, err := filepath.Abs(path)
+	if err != nil {
+		return true
+	}
+	resolved, err := filepath.EvalSymlinks(clean)
+	if err != nil {
+		return true
+	}
+	if info, err := os.Lstat(clean); err != nil || info.Mode()&os.ModeSymlink != 0 {
+		return true
+	}
+	for _, allowed := range roots {
+		if allowed == "" {
+			continue
+		}
+		allowedAbs, err := filepath.Abs(allowed)
+		if err != nil {
+			continue
+		}
+		allowedResolved, err := filepath.EvalSymlinks(allowedAbs)
+		if err != nil {
+			allowedResolved = allowedAbs
+		}
+		if resolved == allowedResolved || strings.HasPrefix(resolved, allowedResolved+string(os.PathSeparator)) {
+			return false
 		}
 	}
-	return false
+	return true
 }
 
 func copyFile(src, dst string) error {
@@ -391,6 +542,9 @@ func copyFile(src, dst string) error {
 		return err
 	}
 	defer in.Close()
+	if info, err := in.Stat(); err == nil && info.Size() < 0 {
+		return fmt.Errorf("附件大小非法")
+	}
 	out, err := os.Create(dst)
 	if err != nil {
 		return err
@@ -411,10 +565,12 @@ func (m *Manager) ensureSession(msg feishu.IncomingMessage) (model.Session, erro
 }
 
 func (m *Manager) collectTurn(stream engine.EventStream, msg feishu.IncomingMessage, sessionID string) (string, model.Turn, []model.ApprovalRequest, error) {
-	turn := model.Turn{ID: uuid.NewString(), AppID: msg.AppID, ChannelKey: msg.ChannelKey, SessionID: sessionID, Status: "completed", Prompt: msg.Prompt, CreatedAt: time.Now()}
+	turn := model.Turn{ID: uuid.NewString(), AppID: msg.AppID, ChannelKey: msg.ChannelKey, SessionID: sessionID, TaskID: msg.TaskID, Status: "completed", Prompt: msg.Prompt, CreatedAt: time.Now()}
 	var b strings.Builder
 	var approvals []model.ApprovalRequest
 	events := 0
+	var collected []engine.TurnEvent
+	approvalRequested := false
 	for stream.Next() {
 		events++
 		if err := m.opts.Guardrail.CheckEventCount(events); err != nil {
@@ -424,10 +580,11 @@ func (m *Manager) collectTurn(stream engine.EventStream, msg feishu.IncomingMess
 			return "", turn, approvals, err
 		}
 		ev := stream.Event()
+		collected = append(collected, ev)
 		if ev.ThreadID != "" {
 			turn.EngineThreadID = ev.ThreadID
 		}
-		if ev.Type == engine.EventDelta || ev.Type == engine.EventCompleted {
+		if !approvalRequested && (ev.Type == engine.EventDelta || ev.Type == engine.EventCompleted) {
 			b.WriteString(ev.Text)
 		}
 		if ev.Type == engine.EventCompleted {
@@ -436,11 +593,12 @@ func (m *Manager) collectTurn(stream engine.EventStream, msg feishu.IncomingMess
 			now := time.Now()
 			turn.CompletedAt = &now
 		}
-		if ev.Type == engine.EventFailed || ev.Type == engine.EventInterrupted {
+		if !approvalRequested && (ev.Type == engine.EventFailed || ev.Type == engine.EventInterrupted) {
 			turn.Status = string(ev.Type)
 			turn.ErrorKind = ev.Error
 		}
 		if ev.Type == engine.EventApprovalRequested {
+			approvalRequested = true
 			expires := time.Now().Add(m.opts.ApprovalTimeout)
 			if m.opts.ApprovalTimeout <= 0 {
 				expires = time.Now().Add(5 * time.Minute)
@@ -463,8 +621,19 @@ func (m *Manager) collectTurn(stream engine.EventStream, msg feishu.IncomingMess
 	if err := stream.Err(); err != nil {
 		return "", turn, approvals, err
 	}
+	if err := engine.ValidateEvents(collected); err != nil {
+		turn.Status = "failed"
+		turn.ErrorKind = "invalid_event_sequence"
+		_ = m.store.Turns().Save(turn)
+		return "", turn, approvals, err
+	}
 	if turn.EngineThreadID == "" {
 		return "", turn, approvals, fmt.Errorf("engine thread id 为空")
+	}
+	if approvalRequested {
+		turn.Status = "pending_approval"
+		turn.ErrorKind = ""
+		turn.Output = ""
 	}
 	return b.String(), turn, approvals, nil
 }
@@ -491,5 +660,30 @@ func first(values ...string) string {
 }
 
 func CleanupExpiredAttachments(store *db.Store, channelKey string, ttlSeconds int) error {
-	return store.Attachments().ExpirePending(channelKey)
+	return CleanupExpiredAttachmentsWithRoots(store, channelKey, ttlSeconds, filepath.Dir(store.Path()))
+}
+
+func CleanupExpiredAttachmentsWithRoots(store *db.Store, channelKey string, ttlSeconds int, roots ...string) error {
+	cutoff := time.Now()
+	if ttlSeconds > 0 {
+		cutoff = cutoff.Add(-time.Duration(ttlSeconds) * time.Second)
+	}
+	expired, err := store.Attachments().ExpirePendingBefore(channelKey, cutoff)
+	if err != nil {
+		return err
+	}
+	for _, att := range expired {
+		for _, path := range []string{att.TempPath, att.SessionPath} {
+			if path == "" {
+				continue
+			}
+			if unsafeTempPath(path, roots...) {
+				continue
+			}
+			if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+				return err
+			}
+		}
+	}
+	return nil
 }

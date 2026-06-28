@@ -14,3 +14,4 @@ config.yaml
 config.*.yaml
 !/config.yaml.template
 !/testdata/legacy/config.redacted.yaml
+/docs/evidence/story06/latest/

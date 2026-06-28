@@ -10,15 +10,16 @@ import (
 )
 
 type Config struct {
-	Server     ServerConfig    `yaml:"server"`
-	Engine     EngineConfig    `yaml:"engine"`
-	Codex      CodexConfig     `yaml:"codex"`
-	Claude     ClaudeConfig    `yaml:"claude"`
-	Session    SessionConfig   `yaml:"session"`
-	Cleanup    CleanupConfig   `yaml:"cleanup"`
-	Guardrails GuardrailConfig `yaml:"guardrails"`
-	Approval   ApprovalConfig  `yaml:"approval"`
-	Apps       []AppConfig     `yaml:"apps"`
+	Server      ServerConfig     `yaml:"server"`
+	Engine      EngineConfig     `yaml:"engine"`
+	Codex       CodexConfig      `yaml:"codex"`
+	Claude      ClaudeConfig     `yaml:"claude"`
+	Session     SessionConfig    `yaml:"session"`
+	Cleanup     CleanupConfig    `yaml:"cleanup"`
+	Attachments AttachmentConfig `yaml:"attachments"`
+	Guardrails  GuardrailConfig  `yaml:"guardrails"`
+	Approval    ApprovalConfig   `yaml:"approval"`
+	Apps        []AppConfig      `yaml:"apps"`
 }
 
 type ServerConfig struct {
@@ -69,6 +70,13 @@ type CleanupConfig struct {
 	AttachmentsRetentionDays int    `yaml:"attachments_retention_days" json:"attachments_retention_days"`
 	AttachmentsMaxDays       int    `yaml:"attachments_max_days" json:"attachments_max_days"`
 	Schedule                 string `yaml:"schedule" json:"schedule"`
+}
+
+type AttachmentConfig struct {
+	PendingTTLMinutes     int    `yaml:"pending_ttl_minutes" json:"pending_ttl_minutes"`
+	PendingMaxItems       int    `yaml:"pending_max_items" json:"pending_max_items"`
+	MaxBytesPerAttachment int64  `yaml:"max_bytes_per_attachment" json:"max_bytes_per_attachment"`
+	TempDir               string `yaml:"temp_dir" json:"temp_dir"`
 }
 
 type GuardrailConfig struct {
@@ -162,6 +170,15 @@ func applyDefaults(cfg *Config) {
 	if cfg.Cleanup.Schedule == "" {
 		cfg.Cleanup.Schedule = "0 2 * * *"
 	}
+	if cfg.Attachments.PendingTTLMinutes == 0 {
+		cfg.Attachments.PendingTTLMinutes = 30
+	}
+	if cfg.Attachments.PendingMaxItems == 0 {
+		cfg.Attachments.PendingMaxItems = 20
+	}
+	if cfg.Attachments.MaxBytesPerAttachment == 0 {
+		cfg.Attachments.MaxBytesPerAttachment = 100 << 20
+	}
 	if cfg.Approval.MockPolicy == "" {
 		cfg.Approval.MockPolicy = "auto_allow"
 	}
@@ -184,6 +201,9 @@ func (c Config) Validate() error {
 	}
 	if c.Server.DebugEnabled && !c.Server.AllowNonLocalDebugBind && c.Server.DebugBind != "127.0.0.1" && c.Server.DebugBind != "localhost" {
 		return fmt.Errorf("debug_bind 必须默认绑定本机，非本机地址需要显式 opt-in")
+	}
+	if c.Server.DebugEnabled && c.Server.DebugToken == "" {
+		return fmt.Errorf("debug_enabled=true 必须配置 debug_token")
 	}
 	for _, app := range c.Apps {
 		if app.ID == "" || strings.Contains(app.ID, "/") {
@@ -221,6 +241,7 @@ func (c Config) ProviderSet() map[string]bool {
 
 func (c Config) RedactedString() string {
 	copy := c
+	copy.Server.DebugToken = redact(copy.Server.DebugToken)
 	for name, p := range copy.Claude.Providers {
 		if p.AuthToken != "" {
 			p.AuthToken = "[REDACTED]"
@@ -228,6 +249,7 @@ func (c Config) RedactedString() string {
 		}
 	}
 	for i := range copy.Apps {
+		copy.Apps[i].FeishuAppID = redact(copy.Apps[i].FeishuAppID)
 		copy.Apps[i].FeishuAppSecret = redact(copy.Apps[i].FeishuAppSecret)
 		copy.Apps[i].FeishuVerificationToken = redact(copy.Apps[i].FeishuVerificationToken)
 		copy.Apps[i].FeishuEncryptKey = redact(copy.Apps[i].FeishuEncryptKey)

@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/kid0317/codex-workspace-bot/internal/db"
 	"github.com/kid0317/codex-workspace-bot/internal/model"
@@ -82,5 +83,30 @@ func TestOpenLegacySQLFixturePreservesRowsAndClaudeSessionID(t *testing.T) {
 	active, _ = store.Sessions().ByID(active.ID)
 	if active.EngineThreadID != "legacy-thread-updated" {
 		t.Fatalf("updated EngineThreadID = %q", active.EngineThreadID)
+	}
+}
+
+func TestEventReceiptPruneBeforeRemovesExpiredRows(t *testing.T) {
+	store, err := db.Open(filepath.Join(t.TempDir(), "bot.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.EventReceipts().Save("old", "demo"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.EventReceipts().Save("fresh", "demo"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.EventReceipts().SetCreatedAtForTest("old", time.Now().Add(-48*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.EventReceipts().PruneBefore(time.Now().Add(-24 * time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if seen, err := store.EventReceipts().Seen("old"); err != nil || seen {
+		t.Fatalf("old receipt seen=%v err=%v", seen, err)
+	}
+	if seen, err := store.EventReceipts().Seen("fresh"); err != nil || !seen {
+		t.Fatalf("fresh receipt seen=%v err=%v", seen, err)
 	}
 }
