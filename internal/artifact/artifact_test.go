@@ -42,6 +42,12 @@ func TestStory06EvidenceArtifactsExist(t *testing.T) {
 			"config.yaml.template",
 			"go run ./cmd/server",
 		},
+		"../../build.sh": {
+			"go test ./...",
+			"go vet ./...",
+			"go build",
+			"dist",
+		},
 	}
 	for path, needles := range required {
 		data, err := os.ReadFile(path)

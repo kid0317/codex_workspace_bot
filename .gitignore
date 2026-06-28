@@ -1,4 +1,5 @@
 /server
+/dist/
 /bot.db
 /runtime/
 /workspaces/
