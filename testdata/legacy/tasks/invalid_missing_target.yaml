@@ -1,4 +1,0 @@
-name: Invalid Missing Target
-enabled: true
-send_output: true
-prompt: "missing target"

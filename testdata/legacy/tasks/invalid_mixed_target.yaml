@@ -1,5 +1,0 @@
-name: Invalid Mixed Target
-enabled: true
-target_type: p2p
-send_output: true
-prompt: "mixed target"

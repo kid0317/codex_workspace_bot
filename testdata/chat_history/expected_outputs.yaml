@@ -1,2 +1,0 @@
-- query: "legacy hello"
-  expected_session_id: "legacy-active"

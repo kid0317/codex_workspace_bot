@@ -1,8 +1,0 @@
-name: Borrow Channel Archive
-enabled: true
-cron: "0 11 * * *"
-target_type: group
-target_id: oc_group
-send_output: false
-post_archive: true
-prompt: "silent maintenance and archive"

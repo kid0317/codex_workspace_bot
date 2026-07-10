@@ -1,6 +1,0 @@
-- name: empty
-  input: ""
-  error: empty_output
-- name: normal
-  input: "hello"
-  error: ""

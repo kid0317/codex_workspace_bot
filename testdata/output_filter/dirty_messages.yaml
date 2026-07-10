@@ -1,4 +1,0 @@
-- input: "已开始新会话"
-  companion_expected: ""
-- input: "hello [[SEND]] world"
-  companion_expected: "hello\nworld"

@@ -1,7 +1,0 @@
-name: User Reply
-enabled: true
-cron: "0 9 * * *"
-target_type: p2p
-target_id: ou_legacy
-send_output: true
-prompt: "daily reply"
