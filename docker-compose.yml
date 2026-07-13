@@ -1,0 +1,19 @@
+services:
+  mysql:
+    image: mysql:8.4.4
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-codex_workspace_bot}
+      MYSQL_USER: ${MYSQL_USER:-codex_workspace_bot}
+      MYSQL_PASSWORD: ${CODEX_WORKSPACE_BOT_DB_PASSWORD}
+    ports:
+      - "127.0.0.1:${MYSQL_HOST_PORT:-3306}:3306"
+    volumes:
+      - ./runtime/mysql-data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -u$$MYSQL_USER -p$$MYSQL_PASSWORD --silent"]
+      interval: 5s
+      timeout: 3s
+      retries: 20

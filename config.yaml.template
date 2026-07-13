@@ -1,0 +1,45 @@
+server:
+  listen_addr: "127.0.0.1:8080"
+logging:
+  level: "info"
+  dir: "logs"
+  retention_days: 30
+database:
+  host: "127.0.0.1"
+  port: 3306
+  name: "codex_workspace_bot"
+  user: "codex_workspace_bot"
+  password_env: "CODEX_WORKSPACE_BOT_DB_PASSWORD"
+  max_open_conns: 10
+  max_idle_conns: 5
+worker:
+  max_workers: 20
+  queue_depth: 64
+  idle_timeout_minutes: 30
+  in_process_timeout_minutes: 90
+  stop_grace_seconds: 10
+codex:
+  command: "codex"
+  rpc_timeout_seconds: 30
+  turn_timeout_seconds: 3000 # 50 minutes: permit long-running Codex work
+  idle_timeout_seconds: 3000 # 50 minutes: do not interrupt a quiet long-running Turn
+  grace_seconds: 10
+streaming:
+  companion_segment_delay_ms: 400
+attachments:
+  root_dir: ".codex-workspace-bot/attachments" # relative or absolute local path; no directory allowlist
+  max_file_bytes: 30000000
+  max_batch_bytes: 30000000
+  download_timeout_seconds: 30
+  retention_days: 7
+  max_retention_days: 30
+  resource_ref_keys:
+    - version: 1
+      key_env: "CODEX_WORKSPACE_BOT_ATTACHMENT_KEY_V1"
+feishu_actions:
+  enabled: true
+  default_doc_folder_token: ""
+  action_timeout_seconds: 20
+  result_keys:
+    - version: 1
+      key_env: "CODEX_WORKSPACE_BOT_ACTION_RESULT_KEY_V1"

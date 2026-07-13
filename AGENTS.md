@@ -60,15 +60,15 @@ Read those docs before making architecture, runtime, protocol, or storage change
   - max active workers: 20
   - per-worker queue depth: 64
   - idle worker recycle: 30 minutes
-- Treat `channel_key = "{chat_type}:{chat_id}:{app_id}"` as the routing identity.
-- Different Feishu Apps may share the same process but must remain isolated by app config, credentials, workspace directory, and allowed chat rules.
+- Treat the Worker routing key as `group:{chat_id}:{app_id}` for group messages and `p2p:{sender_open_id}:{app_id}` for p2p messages. `chat_groups` persistence remains identified by `(app_id, chat_type, chat_id)` in both cases; do not substitute a p2p `open_id` for its persisted `chat_id`.
+- Different Feishu Apps may share the same process but must remain isolated by app config, credentials and workspace directory. The accepted personal-local ingress mode is `all`: every valid p2p/group text received by an enabled App is eligible for processing. A future restrictive chat policy must be explicitly designed per App; do not infer one from an empty list.
 - Enforce receipt/idempotency checks before both enqueueing and out-of-band control-command handling. On a full queue or saturated worker pool, return a deterministic user-facing rejection; never silently drop a message.
 
 ## Feishu Behavior
 
 - Feishu WebSocket events are the primary ingress path.
 - Each Feishu App has its own receiver/client context and credentials.
-- Validate `AllowedChats` before enqueueing user messages.
+- This personal-local product currently has no `AllowedChats` filter: valid p2p/group text for an enabled App is accepted. If a future Story introduces a restrictive chat rule, validate it before persistence and enqueueing; empty/unconfigured must not silently change the accepted `all` behavior.
 - Support text first; when attachments are implemented, download them into session-scoped attachment storage before passing file inputs to Codex.
 - Work mode should stream App Server deltas into Feishu cards.
 - Companion mode should send plain text segments and use `[[SEND]]` as the segmentation marker.
@@ -105,7 +105,7 @@ Read those docs before making architecture, runtime, protocol, or storage change
 - Thread `context.Context` from ingress through storage and App Server calls. Do not retain request contexts in long-lived workers; derive worker and turn contexts with explicit cancellation and deadlines.
 - Return typed or sentinel errors only when callers branch on them. Otherwise wrap operational failures with `%w` and enough stable context to identify the operation, never secrets or raw user content.
 - Make ownership explicit for mutable state. A channel worker exclusively owns its queue, active session, active turn, and card update state; shared registries use synchronization and must not expose mutable internals.
-- Validate configuration at startup: unique App IDs, non-empty workspace directories, valid mode and approval policy, bounded worker settings, and per-App credential/allowed-chat isolation. Keep credential-bearing local configuration out of version control.
+- Validate configuration at startup: unique App IDs, non-empty workspace directories, valid mode and approval policy, bounded worker settings, and per-App credential/workspace isolation. Keep credential-bearing local configuration out of version control.
 - Use parameterized SQL and versioned, forward-only MySQL migrations. Keep persistence changes compatible with active sessions and make state transitions conditional/idempotent.
 - Redact before writing logs, MySQL message records, Langfuse events, or Feishu output. Attachment paths must remain session-scoped and cleanup must be bounded by configured retention.
 - Prefer `slog` with stable fields such as `app_id`, `channel_key`, `session_id`, `thread_id`, `turn_id`, `event`, and `error`; do not log secrets, authorization headers, raw tokens, or full message bodies.
@@ -121,3 +121,16 @@ Read those docs before making architecture, runtime, protocol, or storage change
 ## Current Repository State
 
 At the time this guidance was written, the repository contains design docs only. Do not assume previous scaffold code exists unless it is present in the current checkout.
+
+## Local Runtime Update Rule
+
+- After any change to runtime code, local configuration, database migrations, initialization/import data, or required local dependencies, apply the change and run its relevant verification before restarting the local service. Before asking the user to validate behavior, confirm the new process is using the intended configuration and database state, then report the restarted version and a fresh health check; never present a validation request against a stale process.
+
+## SOP Index
+
+- [Story 从设计到 Delivered](docs/sop/story-design-to-delivery.md): 新 Story、重大整改、真实本地外部边界验收和 Delivered 后复盘时使用。
+- [S01 全过程复盘](docs/story/S01-全过程复盘-2026-07-11.md): 本 SOP 的首个真实案例、时间线和反模式证据。
+- [S02 全过程复盘](docs/story/S02-全过程复盘-2026-07-11.md): Worker Batch、飞书 interactive card PATCH、状态机 timeout 与 Delivered 复审闭环的真实案例。
+- [S03 全过程复盘](docs/story/S03-全过程复盘-2026-07-12.md): App Server 原始事件时间线、固定索引 schema、真实 Turn 时长边界与 L4 交付闭环。
+- [S04 全过程复盘](docs/story/S04-全过程复盘-2026-07-13.md): CardKit 全量实体更新、companion 终态交付槽、可失败 workflow writer 与本地发布顺序。
+- [S05 全过程复盘](docs/story/S05-全过程复盘-2026-07-13.md): 附件 FIFO 输入、飞书受控能力代理、原生图片发送与历史 L4 证据的交付规则。

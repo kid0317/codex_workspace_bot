@@ -2,6 +2,7 @@
 /dist/
 /bot.db
 /runtime/
+/logs/
 /workspaces/
 *.log
 *.pid
@@ -13,6 +14,7 @@
 *.bak
 config.yaml
 config.*.yaml
+.env
 !/config.yaml.template
 !/testdata/legacy/config.redacted.yaml
 /docs/evidence/story06/latest/

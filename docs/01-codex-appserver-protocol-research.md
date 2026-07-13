@@ -158,7 +158,7 @@ cmd.Dir = "/some/dir"
   "method": "thread/start",
   "params": {
     "cwd": "/workspace/investment-assistant",  // ← 指定 thread 的工作目录
-    "approvalPolicy": "untrusted",
+    "approvalPolicy": "never",
     "model": "codex-mini"
   }
 }
@@ -362,8 +362,8 @@ Thread = 一段完整的对话上下文。类似 Claude 的 session，但由 App
     "serviceTier": "default",
 
     // 审批策略
-    "approvalPolicy": "untrusted",
-    "approvalsReviewer": "user",
+    "approvalPolicy": "never",
+    "approvalsReviewer": "auto_review",
 
     // 沙盒
     "sandbox": "danger-full-access",
@@ -397,8 +397,8 @@ Thread = 一段完整的对话上下文。类似 Claude 的 session，但由 App
     "cwd": "/workspace/investment-assistant",
     "model": "codex-mini",
     "modelProvider": "openai",
-    "approvalPolicy": "untrusted",
-    "approvalsReviewer": "user",
+    "approvalPolicy": "never",
+    "approvalsReviewer": "auto_review",
     "sandbox": "danger-full-access",
     "instructionSources": ["/root/.codex/AGENTS.md", "/workspace/investment-assistant/AGENTS.md"]
   }
@@ -459,7 +459,7 @@ Turn = 一次完整的模型推理过程：用户输入 → 模型思考 → 工
     "model": "codex-mini",
     "effort": "high",
     "summary": "auto",
-    "approvalPolicy": "untrusted",
+    "approvalPolicy": "never",
     "personality": "pragmatic",
 
     // 输出约束
@@ -807,9 +807,8 @@ Bot 的 Approval Broker 处理
 ### 8.3 审批策略（AskForApproval）
 
 ```
-"untrusted"   — 所有操作都需要审批（最严格）
-"on-failure"  — 失败时才请求审批
-"on-request"  — 模型主动请求时才审批
+"untrusted"   — 严格策略
+"on-request"  — 模型主动请求时审批
 "never"       — 永不审批（最宽松，danger-full-access 常用）
 {granular: {...}} — 细粒度配置
 ```
@@ -826,7 +825,7 @@ Bot 的 Approval Broker 处理
 
 ```json
 {
-  "approvalPolicy": "untrusted",
+  "approvalPolicy": "never",
   "approvalsReviewer": "auto_review",
   "sandbox": "danger-full-access"
 }
@@ -911,7 +910,7 @@ Bot 的 Approval Broker 处理
 ### 10.1 AskForApproval
 
 ```
-"untrusted" | "on-failure" | "on-request" | "never" | {granular: GranularApproval}
+"untrusted" | "on-request" | "never" | {granular: GranularApproval}
 ```
 
 ### 10.2 ApprovalsReviewer
@@ -1018,9 +1017,9 @@ Server: // 继续执行
 | 场景 | 超时 | 说明 |
 |------|------|------|
 | JSON-RPC 请求响应 | 30s | initialize / thread/start 等 |
-| Turn 执行 | 90min | 跟随 cc_workspace_bot 配置 |
+| Turn 执行 | 50min | 当前 Bot 的总 Turn 与无进展上限 |
 | 审批等待 | 5min | 超时 → auto deny → interrupt turn |
-| Turn 空闲 | 60s | 无事件 60s → interrupt |
+| Turn 空闲 | 50min | 无事件 50 分钟 → interrupt |
 | 连接心跳 | 5min | 长时间无消息，发 ping 检测 |
 
 ### 11.4 重连策略
