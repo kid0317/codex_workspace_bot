@@ -62,8 +62,9 @@ func (p Processor) Materialize(ctx context.Context, input Input) (Result, error)
 	if err := os.MkdirAll(dir, 0o777); err != nil {
 		return Result{}, fmt.Errorf("create attachment directory: %w", err)
 	}
-	part := filepath.Join(dir, "payload.part")
-	payload := filepath.Join(dir, "payload")
+	name := safeDisplayName(input.OriginalName)
+	part := filepath.Join(dir, name+".part")
+	payload := filepath.Join(dir, name)
 	_ = os.Remove(part)
 	defer os.Remove(part)
 	file, err := os.OpenFile(part, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o666)
@@ -147,13 +148,14 @@ func observedMIME(path string) (string, error) {
 }
 
 func safeDisplayName(name string) string {
-	name = filepath.Base(strings.Map(func(r rune) rune {
+	name = filepath.Base(strings.ReplaceAll(name, "\\", "/"))
+	name = strings.Map(func(r rune) rune {
 		if r < 32 || r == '/' || r == '\\' {
 			return -1
 		}
 		return r
-	}, name))
-	if name == "" || name == "." {
+	}, name)
+	if name == "" || name == "." || name == ".." {
 		return "attachment"
 	}
 	return name

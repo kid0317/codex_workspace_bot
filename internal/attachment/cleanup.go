@@ -67,10 +67,18 @@ func (c Cleaner) remove(candidate CleanupCandidate) error {
 		return nil
 	}
 	payload := localAttachmentPath(candidate.WorkspaceDir, candidate.RelativePath)
-	if filepath.Base(payload) != "payload" {
+	leaf := filepath.Base(payload)
+	if leaf != "payload" && leaf != safeDisplayName(candidate.OriginalNameSafe) {
 		return errors.New("attachment payload name is invalid")
 	}
-	if err := os.RemoveAll(filepath.Dir(payload)); err != nil {
+	dir := filepath.Dir(payload)
+	if filepath.Base(dir) != candidate.ID {
+		return errors.New("attachment directory ID is invalid")
+	}
+	if filepath.Base(filepath.Dir(dir)) != candidate.SessionID {
+		return errors.New("attachment directory session ID is invalid")
+	}
+	if err := os.RemoveAll(dir); err != nil {
 		return errors.New("remove attachment payload")
 	}
 	return nil

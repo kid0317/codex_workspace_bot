@@ -19,14 +19,14 @@ type AttachmentCompletion struct {
 // ExpiredAttachment contains the minimum local filesystem projection needed
 // by the retention cleaner. It is never persisted in logs or message bodies.
 type ExpiredAttachment struct {
-	ID, State, WorkspaceDir, RelativePath string
+	ID, State, WorkspaceDir, RelativePath, SessionID, OriginalNameSafe string
 }
 
 func (s *Store) ListExpiredAttachments(ctx context.Context, limit int) ([]ExpiredAttachment, error) {
 	if limit < 1 {
 		return nil, fmt.Errorf("expired attachment limit is invalid")
 	}
-	rows, err := s.DB.QueryContext(ctx, `SELECT a.id, a.state, apps.workspace_dir, COALESCE(a.relative_path, '')
+	rows, err := s.DB.QueryContext(ctx, `SELECT a.id, a.state, apps.workspace_dir, COALESCE(a.relative_path, ''), a.session_id, a.original_name_safe
 		FROM attachments a
 		JOIN chat_groups cg ON cg.id=a.chat_group_id
 		JOIN apps ON apps.id=cg.app_id
@@ -41,9 +41,12 @@ func (s *Store) ListExpiredAttachments(ctx context.Context, limit int) ([]Expire
 	var records []ExpiredAttachment
 	for rows.Next() {
 		var record ExpiredAttachment
-		if err := rows.Scan(&record.ID, &record.State, &record.WorkspaceDir, &record.RelativePath); err != nil {
+		var sessionID, originalNameSafe sql.NullString
+		if err := rows.Scan(&record.ID, &record.State, &record.WorkspaceDir, &record.RelativePath, &sessionID, &originalNameSafe); err != nil {
 			return nil, fmt.Errorf("scan expired attachment: %w", err)
 		}
+		record.SessionID = sessionID.String
+		record.OriginalNameSafe = originalNameSafe.String
 		records = append(records, record)
 	}
 	if err := rows.Err(); err != nil {

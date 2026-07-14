@@ -129,6 +129,135 @@ func TestMaterializeStreamsPayloadIntoSessionScopedAtomicFile(t *testing.T) {
 	}
 }
 
+func TestMaterializePublishesSafeOriginalFilename(t *testing.T) {
+	workspace := t.TempDir()
+	processor := Processor{Downloader: fakeDownloader{body: []byte("ordinary file contents")}, MaxFileBytes: 30_000_000}
+	result, err := processor.Materialize(context.Background(), Input{
+		WorkspaceDir: workspace, RootDir: ".codex-workspace-bot/attachments", AppID: "app-1", ChannelKey: "group:oc-1:app-1", SessionID: "session-1", AttachmentID: "attachment-1",
+		Kind: storage.AttachmentFile, SourceMessageID: "om-1", ResourceKey: "resource-key", OriginalName: "report.txt",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := filepath.Base(result.RelativePath); got != "report.txt" {
+		t.Fatalf("stored leaf=%q, want report.txt", got)
+	}
+}
+
+func TestMaterializeSanitizesTraversalOriginalFilename(t *testing.T) {
+	workspace := t.TempDir()
+	processor := Processor{Downloader: fakeDownloader{body: []byte("ordinary file contents")}, MaxFileBytes: 30_000_000}
+	result, err := processor.Materialize(context.Background(), Input{
+		WorkspaceDir: workspace, RootDir: ".codex-workspace-bot/attachments", AppID: "app-1", ChannelKey: "group:oc-1:app-1", SessionID: "session-1", AttachmentID: "attachment-1",
+		Kind: storage.AttachmentFile, SourceMessageID: "om-1", ResourceKey: "resource-key", OriginalName: "../report.txt",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := filepath.Base(result.RelativePath); got != "report.txt" {
+		t.Fatalf("stored leaf=%q, want sanitized report.txt", got)
+	}
+}
+
+func TestMaterializeSeparatesSameNamedAttachmentsByAttachmentID(t *testing.T) {
+	workspace := t.TempDir()
+	processor := Processor{Downloader: fakeDownloader{body: []byte("ordinary file contents")}, MaxFileBytes: 30_000_000}
+	materialize := func(attachmentID string) Result {
+		t.Helper()
+		result, err := processor.Materialize(context.Background(), Input{
+			WorkspaceDir: workspace, RootDir: ".codex-workspace-bot/attachments", AppID: "app-1", ChannelKey: "group:oc-1:app-1", SessionID: "session-1", AttachmentID: attachmentID,
+			Kind: storage.AttachmentFile, SourceMessageID: "om-1", ResourceKey: "resource-key", OriginalName: "report.txt",
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return result
+	}
+	firstID := "00000000-0000-0000-0000-000000000001"
+	secondID := "00000000-0000-0000-0000-000000000002"
+	first := materialize(firstID)
+	second := materialize(secondID)
+	if filepath.Dir(first.RelativePath) == filepath.Dir(second.RelativePath) {
+		t.Fatalf("same-name attachments share directory: %q", filepath.Dir(first.RelativePath))
+	}
+	if got := filepath.Base(filepath.Dir(first.RelativePath)); got != firstID {
+		t.Fatalf("first attachment directory=%q, want %q", got, firstID)
+	}
+	if got := filepath.Base(filepath.Dir(second.RelativePath)); got != secondID {
+		t.Fatalf("second attachment directory=%q, want %q", got, secondID)
+	}
+	if filepath.Base(first.RelativePath) != "report.txt" || filepath.Base(second.RelativePath) != "report.txt" {
+		t.Fatalf("stored leaves = %q, %q; want report.txt", filepath.Base(first.RelativePath), filepath.Base(second.RelativePath))
+	}
+}
+
+type blockingDownloader struct {
+	started chan<- struct{}
+	release <-chan struct{}
+}
+
+func (d blockingDownloader) Download(context.Context, string, string, storage.AttachmentKind) (io.ReadCloser, string, error) {
+	return &blockingReader{started: d.started, release: d.release}, "source-name", nil
+}
+
+type blockingReader struct {
+	started chan<- struct{}
+	release <-chan struct{}
+	wrote   bool
+}
+
+func (r *blockingReader) Read(p []byte) (int, error) {
+	if r.wrote {
+		return 0, io.EOF
+	}
+	r.wrote = true
+	close(r.started)
+	<-r.release
+	return copy(p, "ordinary file contents"), nil
+}
+
+func (r *blockingReader) Close() error { return nil }
+
+func TestMaterializeUsesSafeTemporaryFilename(t *testing.T) {
+	workspace := t.TempDir()
+	started := make(chan struct{})
+	release := make(chan struct{})
+	processor := Processor{Downloader: blockingDownloader{started: started, release: release}, MaxFileBytes: 30_000_000}
+	errCh := make(chan error, 1)
+	go func() {
+		_, err := processor.Materialize(context.Background(), Input{
+			WorkspaceDir: workspace, RootDir: ".codex-workspace-bot/attachments", AppID: "app-1", ChannelKey: "group:oc-1:app-1", SessionID: "session-1", AttachmentID: "attachment-1",
+			Kind: storage.AttachmentFile, SourceMessageID: "om-1", ResourceKey: "resource-key", OriginalName: "../report.txt",
+		})
+		errCh <- err
+	}()
+	<-started
+	part := filepath.Join(workspace, ".codex-workspace-bot", "attachments", pathHash("app-1"), pathHash("group:oc-1:app-1"), "session-1", "attachment-1", "report.txt.part")
+	_, statErr := os.Stat(part)
+	close(release)
+	if err := <-errCh; err != nil {
+		t.Fatal(err)
+	}
+	if statErr != nil {
+		t.Fatalf("safe temporary file stat error=%v", statErr)
+	}
+}
+
+func TestMaterializeUsesFallbackForDotTraversalName(t *testing.T) {
+	workspace := t.TempDir()
+	processor := Processor{Downloader: fakeDownloader{body: []byte("ordinary file contents")}, MaxFileBytes: 30_000_000}
+	result, err := processor.Materialize(context.Background(), Input{
+		WorkspaceDir: workspace, RootDir: ".codex-workspace-bot/attachments", AppID: "app-1", ChannelKey: "group:oc-1:app-1", SessionID: "session-1", AttachmentID: "attachment-1",
+		Kind: storage.AttachmentFile, SourceMessageID: "om-1", ResourceKey: "resource-key", OriginalName: "..",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := filepath.Base(result.RelativePath); got != "attachment" {
+		t.Fatalf("stored leaf=%q, want fallback attachment", got)
+	}
+}
+
 func TestMaterializeAllowsAnAbsoluteAttachmentRoot(t *testing.T) {
 	workspace := t.TempDir()
 	attachmentRoot := t.TempDir()

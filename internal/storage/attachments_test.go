@@ -115,9 +115,9 @@ func TestListExpiredAttachmentsReturnsOnlyRetentionCleanupProjection(t *testing.
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
-	mock.ExpectQuery("SELECT a.id, a.state, apps.workspace_dir").WithArgs(10).WillReturnRows(sqlmock.NewRows([]string{"id", "state", "workspace_dir", "relative_path"}).AddRow("attachment-1", "ready", "/tmp/workspace", ".codex-workspace-bot/attachments/a/payload"))
+	mock.ExpectQuery("SELECT a.id, a.state, apps.workspace_dir, COALESCE\\(a.relative_path, ''\\), a.session_id, a.original_name_safe").WithArgs(10).WillReturnRows(sqlmock.NewRows([]string{"id", "state", "workspace_dir", "relative_path", "session_id", "original_name_safe"}).AddRow("attachment-1", "ready", "/tmp/workspace", ".codex-workspace-bot/attachments/a/payload", "session-1", "report.txt"))
 	records, err := (&storage.Store{DB: db}).ListExpiredAttachments(context.Background(), 10)
-	if err != nil || len(records) != 1 || records[0].ID != "attachment-1" || records[0].WorkspaceDir != "/tmp/workspace" {
+	if err != nil || len(records) != 1 || records[0].ID != "attachment-1" || records[0].WorkspaceDir != "/tmp/workspace" || records[0].SessionID != "session-1" || records[0].OriginalNameSafe != "report.txt" {
 		t.Fatalf("records=%#v err=%v", records, err)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
