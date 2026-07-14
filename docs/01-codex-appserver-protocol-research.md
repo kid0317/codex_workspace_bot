@@ -1031,6 +1031,10 @@ App Server 进程崩溃时：
 4. 对下一个 turn，尝试 `thread/resume`
 5. 如果 resume 失败，`thread/start` 新建 thread
 
+### 11.5 附件本地路径边界
+
+附件下载完成后才把本机路径传入 `turn/start` input；最终叶名使用受控的原始文件名，临时文件使用不依赖原始名长度的固定有界名称并原子 rename。持久化的 `attachments.relative_path` 必须使用 `utf8mb4`，以保留 Unicode 文件名；清理只接受 session/attachment UUID 层级中的 legacy `payload` 或该受控最终叶名。
+
 ---
 
 ## 附录 A: 协议 Schema 位置

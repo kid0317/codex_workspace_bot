@@ -15,6 +15,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/kid0317/codex-workspace-bot/internal/storage"
 )
@@ -23,6 +24,8 @@ var (
 	ErrTooLarge = errors.New("attachment exceeds configured size limit")
 	ErrInvalid  = errors.New("attachment is invalid")
 )
+
+const maxAttachmentFilenameBytes = 255
 
 type Downloader interface {
 	Download(context.Context, string, string, storage.AttachmentKind) (io.ReadCloser, string, error)
@@ -63,7 +66,7 @@ func (p Processor) Materialize(ctx context.Context, input Input) (Result, error)
 		return Result{}, fmt.Errorf("create attachment directory: %w", err)
 	}
 	name := safeDisplayName(input.OriginalName)
-	part := filepath.Join(dir, name+".part")
+	part := filepath.Join(dir, temporaryAttachmentLeaf(input.AttachmentID))
 	payload := filepath.Join(dir, name)
 	_ = os.Remove(part)
 	defer os.Remove(part)
@@ -111,7 +114,7 @@ func (p Processor) Materialize(ctx context.Context, input Input) (Result, error)
 	if err != nil || filepath.IsAbs(relative) || strings.HasPrefix(relative, ".."+string(filepath.Separator)) || relative == ".." {
 		relative = payload
 	}
-	return Result{RelativePath: relative, ObservedMIME: observed, SHA256: hex.EncodeToString(hash.Sum(nil)), ByteSize: written, DisplayName: safeDisplayName(input.OriginalName)}, nil
+	return Result{RelativePath: relative, ObservedMIME: observed, SHA256: hex.EncodeToString(hash.Sum(nil)), ByteSize: written, DisplayName: name}, nil
 }
 
 func attachmentRoot(workspaceDir, rootDir string) string {
@@ -158,5 +161,35 @@ func safeDisplayName(name string) string {
 	if name == "" || name == "." || name == ".." {
 		return "attachment"
 	}
-	return name
+	if len(name) <= maxAttachmentFilenameBytes {
+		return name
+	}
+	extension := filepath.Ext(name)
+	if extension != "" && len(extension) < maxAttachmentFilenameBytes {
+		base := truncateUTF8Bytes(strings.TrimSuffix(name, extension), maxAttachmentFilenameBytes-len(extension))
+		if base != "" {
+			return base + extension
+		}
+	}
+	return truncateUTF8Bytes(name, maxAttachmentFilenameBytes)
+}
+
+func temporaryAttachmentLeaf(attachmentID string) string {
+	return ".attachment-" + pathHash(attachmentID) + ".part"
+}
+
+func truncateUTF8Bytes(value string, limit int) string {
+	if len(value) <= limit {
+		return value
+	}
+	var builder strings.Builder
+	builder.Grow(limit)
+	for _, r := range value {
+		size := utf8.RuneLen(r)
+		if builder.Len()+size > limit {
+			break
+		}
+		builder.WriteRune(r)
+	}
+	return builder.String()
 }

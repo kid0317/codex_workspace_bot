@@ -49,3 +49,17 @@ func TestS05MigrationDefinesAttachmentAndActionPersistence(t *testing.T) {
 		}
 	}
 }
+
+func TestS10MigrationMakesAttachmentPathsUTF8MB4(t *testing.T) {
+	body, err := os.ReadFile("../../migrations/010_s05_attachment_relative_path_utf8mb4.sql")
+	if err != nil {
+		t.Fatalf("read S10 migration: %v", err)
+	}
+	for _, required := range []string{
+		"ALTER TABLE attachments DROP INDEX uk_attachments_session_path",
+		"MODIFY COLUMN relative_path VARCHAR(2048) CHARACTER SET utf8mb4 NULL",
+		"ADD UNIQUE KEY uk_attachments_session_path (session_id, relative_path(700))",
+	} {
+		if !strings.Contains(string(body), required) {
+			t.Fatalf("S10 migration missing %q", required)
+		}

@@ -12,6 +12,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/kid0317/codex-workspace-bot/internal/storage"
 	"github.com/kid0317/codex-workspace-bot/internal/worker"
@@ -48,6 +49,10 @@ type fakeOpener struct{}
 
 func (fakeOpener) Open(string, string, string, []byte, int) (string, error) {
 	return "resource-key", nil
+}
+
+func temporaryAttachmentPath(workspace string, input Input) string {
+	return filepath.Join(workspace, input.RootDir, pathHash(input.AppID), pathHash(input.ChannelKey), input.SessionID, input.AttachmentID, ".attachment-"+pathHash(input.AttachmentID)+".part")
 }
 
 func TestServicePreparesImageAndFileInputsWithoutResourceKeys(t *testing.T) {
@@ -110,10 +115,11 @@ func TestServiceMarksUndecodableImageAsInvalid(t *testing.T) {
 func TestMaterializeStreamsPayloadIntoSessionScopedAtomicFile(t *testing.T) {
 	workspace := t.TempDir()
 	processor := Processor{Downloader: fakeDownloader{body: []byte("ordinary file contents")}, MaxFileBytes: 30_000_000}
-	result, err := processor.Materialize(context.Background(), Input{
+	input := Input{
 		WorkspaceDir: workspace, RootDir: ".codex-workspace-bot/attachments", AppID: "app-1", ChannelKey: "group:oc-1:app-1", SessionID: "session-1", AttachmentID: "attachment-1",
 		Kind: storage.AttachmentFile, SourceMessageID: "om-1", ResourceKey: "resource-key", OriginalName: "report.txt",
-	})
+	}
+	result, err := processor.Materialize(context.Background(), input)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -124,7 +130,7 @@ func TestMaterializeStreamsPayloadIntoSessionScopedAtomicFile(t *testing.T) {
 	if err != nil || string(payload) != "ordinary file contents" {
 		t.Fatalf("payload=%q err=%v", payload, err)
 	}
-	if _, err := os.Stat(filepath.Join(filepath.Dir(filepath.Join(workspace, result.RelativePath)), "payload.part")); !errors.Is(err, os.ErrNotExist) {
+	if _, err := os.Stat(temporaryAttachmentPath(workspace, input)); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("part file stat error=%v", err)
 	}
 }
@@ -223,16 +229,17 @@ func TestMaterializeUsesSafeTemporaryFilename(t *testing.T) {
 	started := make(chan struct{})
 	release := make(chan struct{})
 	processor := Processor{Downloader: blockingDownloader{started: started, release: release}, MaxFileBytes: 30_000_000}
+	input := Input{
+		WorkspaceDir: workspace, RootDir: ".codex-workspace-bot/attachments", AppID: "app-1", ChannelKey: "group:oc-1:app-1", SessionID: "session-1", AttachmentID: "00000000-0000-0000-0000-000000000002",
+		Kind: storage.AttachmentFile, SourceMessageID: "om-1", ResourceKey: "resource-key", OriginalName: "../report.txt",
+	}
 	errCh := make(chan error, 1)
 	go func() {
-		_, err := processor.Materialize(context.Background(), Input{
-			WorkspaceDir: workspace, RootDir: ".codex-workspace-bot/attachments", AppID: "app-1", ChannelKey: "group:oc-1:app-1", SessionID: "session-1", AttachmentID: "attachment-1",
-			Kind: storage.AttachmentFile, SourceMessageID: "om-1", ResourceKey: "resource-key", OriginalName: "../report.txt",
-		})
+		_, err := processor.Materialize(context.Background(), input)
 		errCh <- err
 	}()
 	<-started
-	part := filepath.Join(workspace, ".codex-workspace-bot", "attachments", pathHash("app-1"), pathHash("group:oc-1:app-1"), "session-1", "attachment-1", "report.txt.part")
+	part := temporaryAttachmentPath(workspace, input)
 	_, statErr := os.Stat(part)
 	close(release)
 	if err := <-errCh; err != nil {
@@ -255,6 +262,59 @@ func TestMaterializeUsesFallbackForDotTraversalName(t *testing.T) {
 	}
 	if got := filepath.Base(result.RelativePath); got != "attachment" {
 		t.Fatalf("stored leaf=%q, want fallback attachment", got)
+	}
+}
+
+func TestMaterializeUsesFallbackForEmptyName(t *testing.T) {
+	workspace := t.TempDir()
+	processor := Processor{Downloader: fakeDownloader{body: []byte("ordinary file contents")}, MaxFileBytes: 30_000_000}
+	result, err := processor.Materialize(context.Background(), Input{
+		WorkspaceDir: workspace, RootDir: ".codex-workspace-bot/attachments", AppID: "app-1", ChannelKey: "group:oc-1:app-1", SessionID: "session-1", AttachmentID: "attachment-1",
+		Kind: storage.AttachmentFile, SourceMessageID: "om-1", ResourceKey: "resource-key",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := filepath.Base(result.RelativePath); got != "attachment" {
+		t.Fatalf("stored leaf=%q, want fallback attachment", got)
+	}
+}
+
+func TestMaterializePreservesBoundaryUnicodeFilenameWithBoundedTemporaryLeaf(t *testing.T) {
+	workspace := t.TempDir()
+	name := strings.Repeat("界", 83) + ".pdf"
+	if len(name) != 253 {
+		t.Fatalf("boundary name bytes=%d, want 253", len(name))
+	}
+	processor := Processor{Downloader: fakeDownloader{body: []byte("ordinary file contents")}, MaxFileBytes: 30_000_000}
+	result, err := processor.Materialize(context.Background(), Input{
+		WorkspaceDir: workspace, RootDir: ".codex-workspace-bot/attachments", AppID: "app-1", ChannelKey: "group:oc-1:app-1", SessionID: "session-1", AttachmentID: "00000000-0000-0000-0000-000000000002",
+		Kind: storage.AttachmentFile, SourceMessageID: "om-1", ResourceKey: "resource-key", OriginalName: name,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := filepath.Base(result.RelativePath); got != name {
+		t.Fatalf("stored leaf=%q, want original boundary name", got)
+	}
+}
+
+func TestMaterializeBoundsOverlongUnicodeFilenameAndPreservesExtension(t *testing.T) {
+	workspace := t.TempDir()
+	processor := Processor{Downloader: fakeDownloader{body: []byte("ordinary file contents")}, MaxFileBytes: 30_000_000}
+	result, err := processor.Materialize(context.Background(), Input{
+		WorkspaceDir: workspace, RootDir: ".codex-workspace-bot/attachments", AppID: "app-1", ChannelKey: "group:oc-1:app-1", SessionID: "session-1", AttachmentID: "00000000-0000-0000-0000-000000000002",
+		Kind: storage.AttachmentFile, SourceMessageID: "om-1", ResourceKey: "resource-key", OriginalName: strings.Repeat("报告", 100) + ".pdf",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	leaf := filepath.Base(result.RelativePath)
+	if len(leaf) > 255 || !utf8.ValidString(leaf) || !strings.HasSuffix(leaf, ".pdf") {
+		t.Fatalf("stored leaf=%q bytes=%d", leaf, len(leaf))
+	}
+	if _, err := os.Stat(filepath.Join(workspace, result.RelativePath)); err != nil {
+		t.Fatalf("final file stat error=%v", err)
 	}
 }
 
@@ -281,14 +341,15 @@ func TestMaterializeAllowsAnAbsoluteAttachmentRoot(t *testing.T) {
 func TestMaterializeRejectsOverLimitAndRemovesPartFile(t *testing.T) {
 	workspace := t.TempDir()
 	processor := Processor{Downloader: fakeDownloader{body: []byte("12345")}, MaxFileBytes: 4}
-	_, err := processor.Materialize(context.Background(), Input{
+	input := Input{
 		WorkspaceDir: workspace, RootDir: ".codex-workspace-bot/attachments", AppID: "app-1", ChannelKey: "group:oc-1:app-1", SessionID: "session-1", AttachmentID: "attachment-1",
 		Kind: storage.AttachmentFile, SourceMessageID: "om-1", ResourceKey: "resource-key",
-	})
+	}
+	_, err := processor.Materialize(context.Background(), input)
 	if !errors.Is(err, ErrTooLarge) {
 		t.Fatalf("Materialize() error=%v, want ErrTooLarge", err)
 	}
-	if matches, globErr := filepath.Glob(filepath.Join(workspace, "**", "payload.part")); globErr != nil || len(matches) != 0 {
-		t.Fatalf("part files=%v globErr=%v", matches, globErr)
+	if _, err := os.Stat(temporaryAttachmentPath(workspace, input)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("temporary file stat error=%v", err)
 	}
 }

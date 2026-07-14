@@ -563,6 +563,10 @@ CREATE TABLE messages (
 
 S04 通过一条 forward-only migration 增加 `companion_delivery_batch_id` 与 `delivery_stage`，初始均为 `NULL`。它们不是 segment outbox：只在 companion 的第一条可能可见发送前写入 `companion_delivery_started`，用于同 Batch 条件收尾和重启时精确标记 abandoned；当前 generation 的 `CompleteBatch` 或 `FailCompanionDelivery` 成功后、或启动 abandoned 收尾后，必须清除 stage，batch ID 保留作为审计关联键。
 
+#### attachments 表（S05）
+
+附件下载后的 `relative_path` 是本机受控目录中 `session_id/attachment_id/<safe-original-name>` 的相对路径；`session_id` 和 `attachment_id` 都是 UUID，重复文件名由 attachment UUID 目录隔离。`relative_path` 使用 `VARCHAR(2048) CHARACTER SET utf8mb4`，以便最终安全叶名保留 Unicode；其 MySQL 唯一索引使用 700-character 前缀以满足 utf8mb4 的索引字节上限，受控路径中的 attachment UUID 位于此前缀内。下载先写入固定、有界的临时叶名，再原子 rename 到最终名；最终名按 UTF-8 字节数限制在文件系统单叶边界内，并尽量保留扩展名。清理兼容历史 `payload` 叶名，但只会删除 UUID 层级和受控叶名同时匹配的目录。
+
 ### 9.2 内存队列
 
 ```go
