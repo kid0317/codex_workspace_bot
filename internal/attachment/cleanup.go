@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/google/uuid"
 	"github.com/kid0317/codex-workspace-bot/internal/storage"
 )
 
@@ -65,6 +66,12 @@ func (c Cleaner) Run(ctx context.Context) (int, error) {
 func (c Cleaner) remove(candidate CleanupCandidate) error {
 	if candidate.WorkspaceDir == "" || candidate.RelativePath == "" {
 		return nil
+	}
+	if _, err := uuid.Parse(candidate.ID); err != nil {
+		return errors.New("attachment ID is invalid")
+	}
+	if _, err := uuid.Parse(candidate.SessionID); err != nil {
+		return errors.New("attachment session ID is invalid")
 	}
 	payload := localAttachmentPath(candidate.WorkspaceDir, candidate.RelativePath)
 	leaf := filepath.Base(payload)
