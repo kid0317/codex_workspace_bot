@@ -102,6 +102,23 @@ func (s *Store) Migrate(ctx context.Context, dir string) error {
 			return fmt.Errorf("commit migration %s: %w", name, err)
 		}
 	}
+	return s.ensureScheduledRunTraceID(ctx)
+}
+
+// ensureScheduledRunTraceID is deliberately schema-introspecting: earlier
+// local S06 builds may already contain this compatible column without a
+// recorded migration, while fresh installations do not. It avoids making an
+// applied migration checksum mutable and is safe to execute on every start.
+func (s *Store) ensureScheduledRunTraceID(ctx context.Context) error {
+	var exists int
+	if err := s.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM information_schema.columns WHERE table_schema=DATABASE() AND table_name='scheduled_task_runs' AND column_name='trace_id'`).Scan(&exists); err != nil {
+		return fmt.Errorf("inspect scheduled run trace id: %w", err)
+	}
+	if exists == 0 {
+		if _, err := s.DB.ExecContext(ctx, `ALTER TABLE scheduled_task_runs ADD COLUMN trace_id CHAR(32) NULL AFTER id, ADD UNIQUE KEY uk_scheduled_task_runs_trace_id (trace_id)`); err != nil {
+			return fmt.Errorf("add scheduled run trace id: %w", err)
+		}
+	}
 	return nil
 }
 

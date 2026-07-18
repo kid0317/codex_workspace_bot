@@ -98,7 +98,7 @@ func (s Service) Prepare(ctx context.Context, batch worker.Batch) ([]codexapp.Te
 				codexapp.TextInput{Type: "localImage", Path: path, Detail: "auto"},
 			)
 		} else {
-			inputs = append(inputs, codexapp.TextInput{Type: "text", Text: fmt.Sprintf("File manifest: %s; local path: %s", result.DisplayName, path)})
+			inputs = append(inputs, codexapp.TextInput{Type: "text", Text: fmt.Sprintf("File manifest: %s; local path: %s", result.DisplayName, path), ObservationPath: path})
 		}
 	}
 	return inputs, nil

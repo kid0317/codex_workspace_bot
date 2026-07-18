@@ -33,6 +33,15 @@ type fakeLifecycle struct {
 	companionFailureCodes []string
 }
 
+type fakeGoalStopper struct {
+	called chan string
+}
+
+func (s *fakeGoalStopper) RequestGoalStop(_ context.Context, batchID string) error {
+	s.called <- batchID
+	return nil
+}
+
 func (f *fakeLifecycle) MarkProcessing(_ context.Context, ids []string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -530,6 +539,38 @@ func TestCancelWaitsForActiveChannelWorkerToRelease(t *testing.T) {
 	}
 }
 
+func TestManagerShutdownCancelsActiveTurnAndWaits(t *testing.T) {
+	output := &fakeOutput{}
+	started := make(chan struct{})
+	cancelled := make(chan struct{})
+	manager := worker.NewManager(worker.Config{}, func(worker.Batch) (worker.Output, error) { return output, nil }, func(ctx context.Context, _ worker.Batch) (worker.ProcessResult, error) {
+		close(started)
+		<-ctx.Done()
+		close(cancelled)
+		return worker.ProcessResult{}, ctx.Err()
+	})
+	defer manager.Close()
+	key := worker.GroupKey("oc-shutdown", "app-shutdown")
+	if err := manager.Accept(context.Background(), testMessage(key, "m-shutdown", "question")); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("processor did not start")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := manager.Shutdown(ctx); err != nil {
+		t.Fatalf("Shutdown() = %v", err)
+	}
+	select {
+	case <-cancelled:
+	case <-time.After(time.Second):
+		t.Fatal("Shutdown returned before the active turn was cancelled")
+	}
+}
+
 func TestCompanionWorkerStopsAfterProcessTimeout(t *testing.T) {
 	output := &fakeOutput{}
 	manager := worker.NewManager(worker.Config{ProcessTimeout: 10 * time.Millisecond}, func(worker.Batch) (worker.Output, error) { return output, nil }, func(ctx context.Context, _ worker.Batch) (worker.ProcessResult, error) {
@@ -554,6 +595,195 @@ func TestCompanionWorkerStopsAfterProcessTimeout(t *testing.T) {
 		case <-time.After(time.Millisecond):
 		}
 	}
+}
+
+func TestManagerGoalIsExclusiveFIFOBarrier(t *testing.T) {
+	output := &fakeOutput{}
+	goalRelease := make(chan struct{})
+	processed := make(chan string, 3)
+	manager := worker.NewManager(worker.Config{}, func(worker.Batch) (worker.Output, error) { return output, nil }, func(_ context.Context, batch worker.Batch) (worker.ProcessResult, error) {
+		if batch.Goal {
+			processed <- "goal"
+			<-goalRelease
+			return worker.ProcessResult{}, nil
+		}
+		processed <- batch.Messages[0].Query
+		return worker.ProcessResult{}, nil
+	})
+	defer manager.Close()
+	key := worker.GroupKey("oc-goal", "app-goal")
+	if err := manager.Accept(context.Background(), testMessage(key, "m-a", "A")); err != nil {
+		t.Fatal(err)
+	}
+	goal := testMessage(key, "m-goal", "objective")
+	goal.Goal = true
+	if err := manager.Accept(context.Background(), goal); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.Accept(context.Background(), testMessage(key, "m-b", "B")); err != nil {
+		t.Fatal(err)
+	}
+	if first := <-processed; first != "A" {
+		t.Fatalf("first = %q", first)
+	}
+	if second := <-processed; second != "goal" {
+		t.Fatalf("second = %q", second)
+	}
+	select {
+	case got := <-processed:
+		t.Fatalf("processed %q before goal terminal", got)
+	case <-time.After(20 * time.Millisecond):
+	}
+	close(goalRelease)
+	if last := <-processed; last != "B" {
+		t.Fatalf("last = %q", last)
+	}
+}
+
+func TestManagerGoalCompleteWithoutFinalShowsSafeNotice(t *testing.T) {
+	output := &fakeOutput{}
+	manager := worker.NewManager(worker.Config{}, func(worker.Batch) (worker.Output, error) { return output, nil }, func(context.Context, worker.Batch) (worker.ProcessResult, error) {
+		return worker.ProcessResult{}, nil
+	})
+	defer manager.Close()
+	key := worker.GroupKey("oc-goal-empty", "app-goal")
+	message := testMessage(key, "m-goal-empty", "objective")
+	message.Goal = true
+	if err := manager.Accept(context.Background(), message); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.After(time.Second)
+	for {
+		output.mu.Lock()
+		zones := append([]struct {
+			final, progress, summary string
+			closed                   bool
+		}(nil), output.zones...)
+		output.mu.Unlock()
+		for _, zone := range zones {
+			if zone.final == "目标已完成，但未收到可展示的最终摘要；请检查已完成的操作与日志。" && zone.progress == "目标已完成；本轮未收到可展示的阶段进展。" && zone.closed {
+				return
+			}
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("goal terminal update = %#v", zones)
+		case <-time.After(time.Millisecond):
+		}
+	}
+}
+
+func TestManagerGoalFinalWithoutCommentaryClosesWithLifecycleProgress(t *testing.T) {
+	output := &fakeOutput{}
+	manager := worker.NewManager(worker.Config{}, func(worker.Batch) (worker.Output, error) { return output, nil }, func(_ context.Context, batch worker.Batch) (worker.ProcessResult, error) {
+		if batch.OnItem == nil {
+			return worker.ProcessResult{}, errors.New("missing presentation callback")
+		}
+		batch.OnItem(worker.PresentationItem{ID: "final", Type: "agentMessage", Phase: "final_answer", Text: "verified final"})
+		return worker.ProcessResult{}, nil
+	})
+	defer manager.Close()
+	key := worker.GroupKey("oc-goal-final", "app-goal")
+	message := testMessage(key, "m-goal-final", "objective")
+	message.Goal = true
+	if err := manager.Accept(context.Background(), message); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.After(time.Second)
+	for {
+		output.mu.Lock()
+		zones := append([]struct {
+			final, progress, summary string
+			closed                   bool
+		}(nil), output.zones...)
+		output.mu.Unlock()
+		for _, zone := range zones {
+			if zone.final == "verified final" && zone.progress == "目标已完成；本轮未收到可展示的阶段进展。" && zone.summary == "目标已完成" && zone.closed {
+				return
+			}
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("goal terminal update = %#v", zones)
+		case <-time.After(time.Millisecond):
+		}
+	}
+}
+
+func TestManagerGoalPausedUsesGoalTerminalMessage(t *testing.T) {
+	output := &fakeOutput{}
+	manager := worker.NewManager(worker.Config{}, func(worker.Batch) (worker.Output, error) { return output, nil }, func(context.Context, worker.Batch) (worker.ProcessResult, error) {
+		return worker.ProcessResult{}, errors.New(`goal terminal status "paused"`)
+	})
+	defer manager.Close()
+	key := worker.GroupKey("oc-goal-paused", "app-goal")
+	message := testMessage(key, "m-goal-paused", "objective")
+	message.Goal = true
+	if err := manager.Accept(context.Background(), message); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.After(time.Second)
+	for {
+		output.mu.Lock()
+		zones := append([]struct {
+			final, progress, summary string
+			closed                   bool
+		}(nil), output.zones...)
+		output.mu.Unlock()
+		for _, zone := range zones {
+			if zone.final == "目标已暂停。" && zone.progress == "目标已暂停。" && zone.summary == "目标未完成" && zone.closed {
+				return
+			}
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("goal paused update = %#v", zones)
+		case <-time.After(time.Millisecond):
+		}
+	}
+}
+
+func TestManagerControlRequestsGoalPauseBeforeReleasingBarrier(t *testing.T) {
+	output := &fakeOutput{}
+	stopped := &fakeGoalStopper{called: make(chan string, 1)}
+	release := make(chan struct{})
+	manager := worker.NewManager(worker.Config{}, func(worker.Batch) (worker.Output, error) { return output, nil }, func(_ context.Context, batch worker.Batch) (worker.ProcessResult, error) {
+		if batch.Goal {
+			<-release
+		}
+		return worker.ProcessResult{}, nil
+	})
+	manager.SetGoalRunController(stopped)
+	defer manager.Close()
+	key := worker.GroupKey("oc-goal-control", "app-goal")
+	goal := testMessage(key, "m-goal-control", "objective")
+	goal.Goal = true
+	if err := manager.Accept(context.Background(), goal); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.After(time.Second)
+	for {
+		if state, ok := manager.State(key); ok && state == worker.InProcess {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatal("goal did not start")
+		case <-time.After(time.Millisecond):
+		}
+	}
+	if err := manager.SubmitControl(context.Background(), key, worker.Control{Run: func(context.Context) error { return nil }}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case batchID := <-stopped.called:
+		if batchID == "" {
+			t.Fatal("empty goal batch id")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("goal pause was not requested")
+	}
+	close(release)
 }
 
 func testMessage(key worker.Key, id, query string) worker.Message {

@@ -9,6 +9,8 @@ import (
 	"os/exec"
 	"sync"
 	"time"
+
+	"github.com/kid0317/codex-workspace-bot/internal/observability"
 )
 
 var (
@@ -34,15 +36,18 @@ type Config struct {
 type starter func() (io.ReadWriteCloser, error)
 
 type Runtime struct {
-	cfg            Config
-	start          starter
-	mu             sync.Mutex
-	availability   Availability
-	closed         bool
-	current        *generation
-	nextGeneration uint64
-	attempts       map[*attempt]struct{}
-	timeline       *Timeline
+	cfg              Config
+	start            starter
+	mu               sync.Mutex
+	availability     Availability
+	closed           bool
+	current          *generation
+	nextGeneration   uint64
+	attempts         map[*attempt]struct{}
+	goals            map[string]*GoalAttempt
+	pendingStops     map[string]struct{}
+	earlyGoalUpdates map[string]Event
+	timeline         *Timeline
 }
 
 type generation struct {
@@ -50,24 +55,50 @@ type generation struct {
 	client *Client
 }
 type attempt struct {
-	mu               sync.Mutex
-	generation       uint64
-	threadID, turnID string
-	pending          []Event
-	pendingBytes     int
-	presentationOver bool
-	done             chan error
-	finished         bool
-	stopping         bool
-	progress         chan struct{}
-	route            RouteMetadata
-	onItem           func(CompletedItem) bool
-	toolHandler      ToolHandler
-	ctx              context.Context
-	cancel           context.CancelFunc
-	actionSlots      chan struct{}
-	bound            chan struct{}
-	boundOnce        sync.Once
+	mu                   sync.Mutex
+	generation           uint64
+	threadID, turnID     string
+	pending              []Event
+	pendingBytes         int
+	presentationOver     bool
+	done                 chan error
+	finished             bool
+	stopping             bool
+	progress             chan struct{}
+	route                RouteMetadata
+	onItem               func(CompletedItem) bool
+	onTurnCompleted      func(TurnCompleted)
+	observation          *observability.Attempt
+	toolHandler          ToolHandler
+	ctx                  context.Context
+	cancel               context.CancelFunc
+	actionSlots          chan struct{}
+	bound                chan struct{}
+	boundOnce            sync.Once
+	goal                 bool
+	knownTurns           map[string]struct{}
+	goalTerminal         bool
+	goalErr              error
+	awaitingContinuation bool
+	turnChanged          chan struct{}
+	toolCalls            map[string]*toolCallState
+	lastTokenUsage       *observability.Usage
+	pauseConfirmed       bool
+	stopRequested        bool
+}
+type toolCallState struct {
+	result                   any
+	handlerErr               error
+	handlerStarted, terminal bool
+}
+
+// GoalAttempt reserves a thread-level owner before thread/goal/set. It keeps
+// notifications received in the set→turn/start window from becoming unrouted.
+type GoalAttempt struct {
+	runtime *Runtime
+	gen     *generation
+	attempt *attempt
+	params  TurnStartParams
 }
 
 const (
@@ -101,7 +132,7 @@ func NewRuntimeWithStarter(cfg Config, start starter) *Runtime {
 	if cfg.Now == nil {
 		cfg.Now = time.Now
 	}
-	return &Runtime{cfg: cfg, start: start, availability: Unavailable, attempts: make(map[*attempt]struct{})}
+	return &Runtime{cfg: cfg, start: start, availability: Unavailable, attempts: make(map[*attempt]struct{}), goals: make(map[string]*GoalAttempt), pendingStops: make(map[string]struct{}), earlyGoalUpdates: make(map[string]Event)}
 }
 
 func (r *Runtime) Start(ctx context.Context) error {
@@ -158,6 +189,7 @@ func (r *Runtime) startGeneration(parent context.Context) error {
 		observer = timeline
 	}
 	gen.client = NewClient(conn, observer, r.dispatch, r.handleServerRequest)
+	gen.client.SetServerResponseObserver(r.handleServerResponse)
 	ctx, cancel := context.WithTimeout(parent, r.cfg.RPCTimeout)
 	defer cancel()
 	if _, err := gen.client.Call(ctx, "initialize", map[string]any{"clientInfo": map[string]string{"name": "codex-workspace-bot", "version": "s03"}, "capabilities": map[string]any{"experimentalApi": true}}); err != nil {
@@ -222,13 +254,235 @@ func (r *Runtime) Call(ctx context.Context, method string, params any) (json.Raw
 	return gen.client.Call(requestCtx, method, params)
 }
 
+func (r *Runtime) RegisterGoalThread(threadID string) {
+	r.mu.Lock()
+	timeline := r.timeline
+	r.mu.Unlock()
+	if timeline != nil {
+		timeline.RegisterGoalThread(threadID)
+	}
+}
+
+func (r *Runtime) UnregisterGoalThread(threadID string) {
+	r.mu.Lock()
+	timeline := r.timeline
+	r.mu.Unlock()
+	if timeline != nil {
+		timeline.UnregisterGoalThread(threadID)
+	}
+}
+
 func (r *Runtime) StartTurn(ctx context.Context, threadID string, params TurnStartParams) (time.Time, error) {
+	return r.startAttempt(ctx, threadID, params, false)
+}
+
+// StartGoal starts the objective turn for an already-active thread Goal. Unlike
+// StartTurn it remains owned across App Server continuation turns and finishes
+// only when the Goal reports a terminal status (or a local failure occurs).
+func (r *Runtime) StartGoal(ctx context.Context, threadID string, params TurnStartParams) (time.Time, error) {
+	goal, err := r.PrepareGoal(ctx, threadID, params)
+	if err != nil {
+		return time.Time{}, err
+	}
+	defer goal.Close()
+	return goal.Start(ctx)
+}
+
+func (r *Runtime) PrepareGoal(ctx context.Context, threadID string, params TurnStartParams) (*GoalAttempt, error) {
+	gen, err := r.client()
+	if err != nil {
+		return nil, err
+	}
+	attemptCtx, attemptCancel := context.WithCancel(ctx)
+	a := &attempt{generation: gen.id, threadID: threadID, done: make(chan error, 1), progress: make(chan struct{}, 1), route: params.Route, onItem: params.OnItem, onTurnCompleted: params.OnTurnCompleted, observation: params.Observation, toolHandler: params.ToolHandler, ctx: attemptCtx, cancel: attemptCancel, actionSlots: make(chan struct{}, 4), bound: make(chan struct{}), goal: true, knownTurns: make(map[string]struct{}), turnChanged: make(chan struct{}, 1)}
+	r.mu.Lock()
+	r.attempts[a] = struct{}{}
+	early := r.earlyGoalUpdates[threadID]
+	delete(r.earlyGoalUpdates, threadID)
+	r.mu.Unlock()
+	if early.Method != "" {
+		r.routeAttempt(a, early)
+	}
+	goal := &GoalAttempt{runtime: r, gen: gen, attempt: a, params: params}
+	if params.Route.AttemptID != "" {
+		r.mu.Lock()
+		r.goals[params.Route.AttemptID] = goal
+		if _, stopping := r.pendingStops[params.Route.AttemptID]; stopping {
+			goal.attempt.stopRequested = true
+			delete(r.pendingStops, params.Route.AttemptID)
+		}
+		r.mu.Unlock()
+	}
+	return goal, nil
+}
+
+func (g *GoalAttempt) Done() <-chan error { return g.attempt.done }
+
+func (g *GoalAttempt) Close() {
+	if g == nil || g.runtime == nil || g.attempt == nil {
+		return
+	}
+	g.attempt.cancel()
+	g.runtime.mu.Lock()
+	delete(g.runtime.attempts, g.attempt)
+	if g.params.Route.AttemptID != "" && g.runtime.goals[g.params.Route.AttemptID] == g {
+		delete(g.runtime.goals, g.params.Route.AttemptID)
+	}
+	g.runtime.mu.Unlock()
+	g.runtime.UnregisterGoalThread(g.attempt.threadID)
+}
+
+// RequestGoalStop synchronously pauses a registered Goal before its worker
+// interrupts the active Turn. A missing goal means the batch has not reached
+// registration yet and is treated as unavailable to the caller.
+func (r *Runtime) RequestGoalStop(ctx context.Context, attemptID string) error {
+	r.mu.Lock()
+	goal := r.goals[attemptID]
+	if goal == nil {
+		r.pendingStops[attemptID] = struct{}{}
+	}
+	r.mu.Unlock()
+	if goal == nil {
+		return nil
+	}
+	return goal.BeginStop(ctx)
+}
+
+func (g *GoalAttempt) BeginStop(ctx context.Context) error {
+	a := g.attempt
+	a.mu.Lock()
+	if a.pauseConfirmed || a.goalTerminal {
+		a.mu.Unlock()
+		return nil
+	}
+	a.stopping = true
+	turnID := a.turnID
+	a.mu.Unlock()
+	if _, err := g.runtime.Call(ctx, "thread/goal/set", map[string]any{"threadId": a.threadID, "status": "paused"}); err != nil {
+		g.gen.client.Close()
+		return fmt.Errorf("pause goal: %w", err)
+	}
+	result, err := g.runtime.Call(ctx, "thread/goal/get", map[string]any{"threadId": a.threadID})
+	if err != nil {
+		g.gen.client.Close()
+		return fmt.Errorf("confirm paused goal: %w", err)
+	}
+	var parsed struct {
+		Goal struct {
+			Status string `json:"status"`
+		} `json:"goal"`
+	}
+	if json.Unmarshal(result, &parsed) != nil {
+		g.gen.client.Close()
+		return errors.New("goal pause was not confirmed")
+	}
+	a.mu.Lock()
+	switch parsed.Goal.Status {
+	case "paused":
+		a.goalTerminal, a.pauseConfirmed, a.goalErr = true, true, fmt.Errorf(`goal terminal status "paused"`)
+	case "complete", "completed":
+		a.goalTerminal, a.goalErr = true, nil
+	case "budget_limited":
+		a.goalTerminal, a.goalErr = true, fmt.Errorf(`goal terminal status "budget_limited"`)
+	default:
+		a.mu.Unlock()
+		g.gen.client.Close()
+		return errors.New("goal pause was not confirmed")
+	}
+	goalErr := a.goalErr
+	a.mu.Unlock()
+	if parsed.Goal.Status == "complete" || parsed.Goal.Status == "completed" || parsed.Goal.Status == "budget_limited" {
+		// This is already a server-authoritative terminal. Keep its current
+		// turn in terminal drain rather than interrupting or replacing it.
+		if turnID == "" {
+			g.runtime.finish(a, goalErr)
+		}
+		return nil
+	}
+	if turnID == "" {
+		g.runtime.finish(a, goalErr)
+		return nil
+	}
+	interruptCtx, cancel := context.WithTimeout(context.Background(), g.runtime.cfg.Grace)
+	defer cancel()
+	_, _ = g.gen.client.Call(interruptCtx, "turn/interrupt", map[string]any{"threadId": a.threadID, "turnId": turnID})
+	return nil
+}
+
+func (g *GoalAttempt) Start(ctx context.Context) (time.Time, error) {
+	a := g.attempt
+	a.mu.Lock()
+	stopRequested := a.stopRequested
+	if a.finished {
+		a.mu.Unlock()
+		select {
+		case err := <-a.done:
+			return time.Time{}, err
+		default:
+			return time.Time{}, errors.New("goal finished before first turn")
+		}
+	}
+	a.mu.Unlock()
+	if stopRequested {
+		if err := g.BeginStop(ctx); err != nil {
+			return time.Time{}, err
+		}
+		select {
+		case err := <-a.done:
+			return time.Time{}, err
+		default:
+			return time.Time{}, errors.New("goal was stopped before first turn")
+		}
+	}
+	params := g.params
+	params.ThreadID = a.threadID
+	responseCtx, cancel := context.WithTimeout(context.Background(), g.runtime.cfg.RPCTimeout)
+	result, err := g.gen.client.Call(responseCtx, "turn/start", params)
+	cancel()
+	if err != nil {
+		g.gen.client.Close()
+		return time.Time{}, err
+	}
+	startedAt := g.runtime.cfg.Now()
+	var parsed struct {
+		Turn struct {
+			ID string `json:"id"`
+		} `json:"turn"`
+	}
+	if err := json.Unmarshal(result, &parsed); err != nil || parsed.Turn.ID == "" {
+		g.gen.client.Close()
+		return startedAt, fmt.Errorf("turn/start missing turn id")
+	}
+	if params.OnTurnStarted != nil {
+		params.OnTurnStarted(parsed.Turn.ID)
+	}
+	g.runtime.bindAttempt(a, parsed.Turn.ID)
+	a.mu.Lock()
+	finished := a.finished
+	a.mu.Unlock()
+	if finished {
+		go func() {
+			interruptCtx, interruptCancel := context.WithTimeout(context.Background(), g.runtime.cfg.Grace)
+			defer interruptCancel()
+			_, _ = g.gen.client.Call(interruptCtx, "turn/interrupt", map[string]any{"threadId": a.threadID, "turnId": parsed.Turn.ID})
+		}()
+		select {
+		case err := <-a.done:
+			return startedAt, err
+		default:
+			return startedAt, errors.New("goal finished before first turn response")
+		}
+	}
+	return g.runtime.waitAttempt(ctx, g.gen, a, startedAt)
+}
+
+func (r *Runtime) startAttempt(ctx context.Context, threadID string, params TurnStartParams, goal bool) (time.Time, error) {
 	gen, err := r.client()
 	if err != nil {
 		return time.Time{}, err
 	}
 	attemptCtx, attemptCancel := context.WithCancel(ctx)
-	a := &attempt{generation: gen.id, threadID: threadID, done: make(chan error, 1), progress: make(chan struct{}, 1), route: params.Route, onItem: params.OnItem, toolHandler: params.ToolHandler, ctx: attemptCtx, cancel: attemptCancel, actionSlots: make(chan struct{}, 4), bound: make(chan struct{})}
+	a := &attempt{generation: gen.id, threadID: threadID, done: make(chan error, 1), progress: make(chan struct{}, 1), route: params.Route, onItem: params.OnItem, onTurnCompleted: params.OnTurnCompleted, observation: params.Observation, toolHandler: params.ToolHandler, ctx: attemptCtx, cancel: attemptCancel, actionSlots: make(chan struct{}, 4), bound: make(chan struct{}), goal: goal, knownTurns: make(map[string]struct{}), turnChanged: make(chan struct{}, 1)}
 	r.mu.Lock()
 	r.attempts[a] = struct{}{}
 	r.mu.Unlock()
@@ -239,7 +493,10 @@ func (r *Runtime) StartTurn(ctx context.Context, threadID string, params TurnSta
 		r.mu.Unlock()
 	}()
 	params.ThreadID = threadID
-	responseCtx, cancel := context.WithTimeout(ctx, r.cfg.RPCTimeout)
+	// The request lifetime is intentionally independent from the channel's
+	// cancellation. App Server may accept turn/start before replying; retaining
+	// correlation lets us bind a late turn ID and interrupt that accepted turn.
+	responseCtx, cancel := context.WithTimeout(context.Background(), r.cfg.RPCTimeout)
 	result, err := gen.client.Call(responseCtx, "turn/start", params)
 	cancel()
 	if err != nil {
@@ -260,6 +517,13 @@ func (r *Runtime) StartTurn(ctx context.Context, threadID string, params TurnSta
 		params.OnTurnStarted(parsed.Turn.ID)
 	}
 	r.bindAttempt(a, parsed.Turn.ID)
+	if ctx.Err() != nil {
+		return startedAt, r.interruptAndFail(gen, a, ctx.Err().Error())
+	}
+	return r.waitAttempt(ctx, gen, a, startedAt)
+}
+
+func (r *Runtime) waitAttempt(ctx context.Context, gen *generation, a *attempt, startedAt time.Time) (time.Time, error) {
 	total := time.NewTimer(r.cfg.TurnTimeout)
 	defer total.Stop()
 	idle := time.NewTimer(r.cfg.IdleTimeout)
@@ -276,6 +540,9 @@ func (r *Runtime) StartTurn(ctx context.Context, threadID string, params TurnSta
 				}
 			}
 			idle.Reset(r.cfg.IdleTimeout)
+		case <-a.turnChanged:
+			resetTimer(total, r.cfg.TurnTimeout)
+			resetTimer(idle, r.cfg.IdleTimeout)
 		case <-total.C:
 			return startedAt, r.interruptAndFail(gen, a, "turn total timeout")
 		case <-idle.C:
@@ -307,6 +574,7 @@ func (r *Runtime) handleServerRequest(event Event) (any, error) {
 		matches := sameThread && bound && a.turnID == call.TurnID && !a.finished
 		wait := a.boundLocked()
 		handler := a.toolHandler
+		observation := a.observation
 		handlerCtx := a.ctx
 		a.mu.Unlock()
 		if sameThread && !bound {
@@ -314,6 +582,7 @@ func (r *Runtime) handleServerRequest(event Event) (any, error) {
 			a.mu.Lock()
 			matches = a.turnID == call.TurnID && !a.finished
 			handler = a.toolHandler
+			observation = a.observation
 			handlerCtx = a.ctx
 			a.mu.Unlock()
 		}
@@ -322,6 +591,28 @@ func (r *Runtime) handleServerRequest(event Event) (any, error) {
 		}
 		if handler == nil {
 			return ToolResult{Success: false, ContentItems: []ToolContentItem{{Type: "inputText", Text: "tool is unavailable for this turn"}}}, nil
+		}
+		// Register the request under the same attempt mutex used by finish. This
+		// is the terminal fence: once finish wins, no later handler may acquire a
+		// slot and cause a side effect.
+		a.mu.Lock()
+		if a.finished || a.turnID != call.TurnID {
+			a.mu.Unlock()
+			return ToolResult{Success: false, ContentItems: []ToolContentItem{{Type: "inputText", Text: "tool request arrived after turn terminal"}}}, nil
+		}
+		if a.toolCalls == nil {
+			a.toolCalls = make(map[string]*toolCallState)
+		}
+		if _, exists := a.toolCalls[call.CallID]; !exists {
+			a.toolCalls[call.CallID] = &toolCallState{}
+		}
+		generation := a.generation
+		a.mu.Unlock()
+		if observation != nil {
+			observation.RecordProtocolEvent(generation, event.Seq, event.Method, event.Params)
+			if !observation.StartTool(call.CallID, call.Tool, call.Arguments) {
+				return ToolResult{Success: false, ContentItems: []ToolContentItem{{Type: "inputText", Text: "tool request arrived after protocol terminal"}}}, nil
+			}
 		}
 		if handlerCtx == nil {
 			handlerCtx = context.Background()
@@ -332,15 +623,91 @@ func (r *Runtime) handleServerRequest(event Event) (any, error) {
 		case <-handlerCtx.Done():
 			return ToolResult{Success: false, ContentItems: []ToolContentItem{{Type: "inputText", Text: "tool call was cancelled"}}}, nil
 		}
-		return handler(handlerCtx, call)
+		a.mu.Lock()
+		state := a.toolCalls[call.CallID]
+		if a.finished || a.turnID != call.TurnID || state == nil || state.terminal || state.handlerStarted {
+			a.mu.Unlock()
+			return ToolResult{Success: false, ContentItems: []ToolContentItem{{Type: "inputText", Text: "tool call was cancelled before execution"}}}, nil
+		}
+		// Same-mutex handler-start permit: finish marks unconsumed permits as
+		// terminal. If terminal wins, no handler side effect can start.
+		state.handlerStarted = true
+		a.mu.Unlock()
+		result, err := handler(handlerCtx, call)
+		a.mu.Lock()
+		if state := a.toolCalls[call.CallID]; state != nil {
+			state.result, state.handlerErr = result, err
+		}
+		a.mu.Unlock()
+		return result, err
 	}
 	return ToolResult{Success: false, ContentItems: []ToolContentItem{{Type: "inputText", Text: "tool request does not match the active turn"}}}, nil
 }
 
-func (r *Runtime) bindAttempt(a *attempt, turnID string) {
+func (r *Runtime) handleServerResponse(event Event, writeErr error) {
+	if event.Method != "item/tool/call" {
+		return
+	}
+	var call ToolCall
+	if json.Unmarshal(event.Params, &call) != nil || call.CallID == "" {
+		return
+	}
+	r.mu.Lock()
+	attempts := make([]*attempt, 0, len(r.attempts))
+	for a := range r.attempts {
+		attempts = append(attempts, a)
+	}
+	r.mu.Unlock()
+	for _, a := range attempts {
+		a.mu.Lock()
+		if a.threadID != call.ThreadID || a.turnID != call.TurnID {
+			a.mu.Unlock()
+			continue
+		}
+		state := a.toolCalls[call.CallID]
+		observation := a.observation
+		if state != nil {
+			delete(a.toolCalls, call.CallID)
+		}
+		a.mu.Unlock()
+		if state == nil || observation == nil {
+			return
+		}
+		if writeErr != nil {
+			observation.EndTool(call.CallID, map[string]any{"handler_result": state.result, "response_write": "failed"}, writeErr)
+		} else if state.handlerErr != nil {
+			observation.EndTool(call.CallID, map[string]any{"handler_result": state.result, "response_write": "error_response_written"}, state.handlerErr)
+		} else {
+			observation.EndTool(call.CallID, map[string]any{"handler_result": state.result, "response_write": "written"}, nil)
+		}
+		return
+	}
+}
+
+func (r *Runtime) bindAttempt(a *attempt, turnID string) bool {
 	a.mu.Lock()
 	bound := a.boundLocked()
+	if a.finished || (a.goal && (a.goalTerminal || a.stopping)) {
+		a.mu.Unlock()
+		return false
+	}
+	if a.goal && a.turnID != "" && a.turnID != turnID {
+		if _, alreadyKnown := a.knownTurns[turnID]; alreadyKnown {
+			a.mu.Unlock()
+			return false
+		}
+	}
+	if a.turnID != turnID {
+		// tokenUsage.total is cumulative for a Thread. A fallback belongs only
+		// to the turn that observed it; never carry a prior turn's last snapshot
+		// into a newly bound continuation.
+		a.lastTokenUsage = nil
+	}
 	a.turnID = turnID
+	if a.goal {
+		a.knownTurns[turnID] = struct{}{}
+		a.awaitingContinuation = false
+	}
 	pending := a.pending
 	presentationOver := a.presentationOver
 	a.pending = nil
@@ -348,7 +715,7 @@ func (r *Runtime) bindAttempt(a *attempt, turnID string) {
 	a.boundOnce.Do(func() { close(bound) })
 	if presentationOver {
 		r.interruptAttempt(a, "presentation_backpressure")
-		return
+		return true
 	}
 	for _, event := range pending {
 		threadID, eventTurnID := eventIDs(event.Params)
@@ -356,6 +723,21 @@ func (r *Runtime) bindAttempt(a *attempt, turnID string) {
 			r.routeAttempt(a, event)
 		}
 	}
+	select {
+	case a.turnChanged <- struct{}{}:
+	default:
+	}
+	return true
+}
+
+func resetTimer(timer *time.Timer, duration time.Duration) {
+	if !timer.Stop() {
+		select {
+		case <-timer.C:
+		default:
+		}
+	}
+	timer.Reset(duration)
 }
 
 func (r *Runtime) interruptAndFail(gen *generation, a *attempt, reason string) error {
@@ -384,7 +766,9 @@ func (r *Runtime) interruptAndFail(gen *generation, a *attempt, reason string) e
 		}
 		return err
 	case <-grace.C:
-		gen.client.Close()
+		// A single uncooperative turn is a local command failure, not evidence
+		// that the shared App Server generation is broken. Keep other channels
+		// alive; a real process/protocol exit still goes through onGenerationExit.
 		return interruptionError(reason)
 	}
 }
@@ -411,6 +795,54 @@ func (r *Runtime) dispatch(event Event) (string, error) {
 	for _, a := range attempts {
 		a.mu.Lock()
 		sameThread := threadID != "" && a.threadID == threadID
+		if sameThread && event.Method == "thread/tokenUsage/updated" && !a.finished {
+			a.mu.Unlock()
+			r.routeAttempt(a, event)
+			return "attempt_routed", nil
+		}
+		// Several App Server protocol notifications (hooks, thread state and
+		// future diagnostics) identify an active Thread but omit turnId. While
+		// this attempt owns the thread, keep their complete business payload in
+		// the same Trace instead of silently dropping it.
+		if sameThread && turnID == "" && !a.finished {
+			a.mu.Unlock()
+			r.routeAttempt(a, event)
+			return "attempt_routed", nil
+		}
+		if sameThread && a.goal {
+			finished := a.finished
+			_, knownTurn := a.knownTurns[turnID]
+			bound := a.turnID != ""
+			awaitingContinuation := a.awaitingContinuation
+			goalTerminal := a.goalTerminal
+			stopping := a.stopping
+			a.mu.Unlock()
+			if finished {
+				continue
+			}
+			if event.Method == "thread/goal/updated" {
+				r.routeAttempt(a, event)
+				return "goal_routed", nil
+			}
+			if event.Method == "turn/started" && turnID != "" && !goalTerminal && !stopping && r.bindAttempt(a, turnID) {
+				return "goal_continuation_bound", nil
+			}
+			if !bound && turnID != "" {
+				a.mu.Lock()
+				a.pending = append(a.pending, event)
+				a.mu.Unlock()
+				return "pending_turn_binding", nil
+			}
+			if !knownTurn && awaitingContinuation && !goalTerminal && !stopping && isContinuationTurnEvidence(event) && r.bindAttempt(a, turnID) {
+				r.routeAttempt(a, event)
+				return "goal_continuation_bound", nil
+			}
+			if knownTurn {
+				r.routeAttempt(a, event)
+				return "goal_routed", nil
+			}
+			continue
+		}
 		bound := a.turnID != ""
 		sameTurn := bound && turnID == a.turnID
 		if sameThread && !bound && turnID != "" {
@@ -432,25 +864,119 @@ func (r *Runtime) dispatch(event Event) (string, error) {
 			return "attempt_routed", nil
 		}
 	}
+	if event.Method == "thread/goal/updated" && threadID != "" {
+		r.mu.Lock()
+		if r.earlyGoalUpdates == nil {
+			r.earlyGoalUpdates = make(map[string]Event)
+		}
+		r.earlyGoalUpdates[threadID] = event
+		r.mu.Unlock()
+		return "pending_goal_preparation", nil
+	}
 	return "unrouted", nil
 }
 
 func (r *Runtime) routeAttempt(a *attempt, event Event) {
+	if a.observation != nil {
+		a.observation.RecordProtocolEvent(a.generation, event.Seq, event.Method, event.Params)
+	}
 	if event.Class == "server_request" {
 		r.finish(a, fmt.Errorf("unsupported app server request: %s", event.Method))
+		return
+	}
+	if event.Method == "thread/tokenUsage/updated" {
+		if snapshot, ok := usageSnapshot(event.Params); ok {
+			a.mu.Lock()
+			a.lastTokenUsage = &snapshot
+			a.mu.Unlock()
+		}
+	}
+	if event.Method == "thread/goal/updated" && a.goal {
+		var params struct {
+			Goal struct {
+				Status string `json:"status"`
+			} `json:"goal"`
+		}
+		if json.Unmarshal(event.Params, &params) == nil {
+			a.mu.Lock()
+			switch params.Goal.Status {
+			case "complete", "completed":
+				a.goalTerminal, a.goalErr = true, nil
+			case "paused", "budget_limited":
+				a.goalTerminal, a.goalErr = true, fmt.Errorf("goal terminal status %q", params.Goal.Status)
+			default:
+				a.mu.Unlock()
+				return
+			}
+			turnID, goalErr, awaitingContinuation := a.turnID, a.goalErr, a.awaitingContinuation
+			a.mu.Unlock()
+			if turnID == "" || awaitingContinuation {
+				r.finish(a, goalErr)
+			}
+		}
 		return
 	}
 	if event.Method == "turn/completed" {
 		var params struct {
 			Turn struct {
+				ID     string `json:"id"`
 				Status string `json:"status"`
+				Usage  *struct {
+					InputTokens           int64 `json:"inputTokens"`
+					OutputTokens          int64 `json:"outputTokens"`
+					CachedInputTokens     int64 `json:"cachedInputTokens"`
+					ReasoningOutputTokens int64 `json:"reasoningOutputTokens"`
+					TotalTokens           int64 `json:"totalTokens"`
+				} `json:"usage"`
 			} `json:"turn"`
 		}
 		_ = json.Unmarshal(event.Params, &params)
-		if params.Turn.Status == "completed" {
+		a.mu.Lock()
+		onTurnCompleted := a.onTurnCompleted
+		lastSnapshot := a.lastTokenUsage
+		goal, goalTerminal := a.goal, a.goalTerminal
+		a.mu.Unlock()
+		if onTurnCompleted != nil {
+			completed := TurnCompleted{ThreadID: a.threadID, TurnID: params.Turn.ID, Status: params.Turn.Status}
+			if params.Turn.Usage != nil {
+				completed.Usage = &observability.Usage{InputTokens: params.Turn.Usage.InputTokens, OutputTokens: params.Turn.Usage.OutputTokens, CachedInputTokens: params.Turn.Usage.CachedInputTokens, ReasoningOutputTokens: params.Turn.Usage.ReasoningOutputTokens, TotalTokens: params.Turn.Usage.TotalTokens}
+			} else if lastSnapshot != nil {
+				snapshot := *lastSnapshot
+				completed.SnapshotUsage = &snapshot
+			}
+			onTurnCompleted(completed)
+		}
+		turnErr := error(nil)
+		if params.Turn.Status != "completed" {
+			turnErr = fmt.Errorf("turn completed with status %q", params.Turn.Status)
+		}
+		if a.observation != nil && (!goal || goalTerminal) {
+			var terminalUsage *observability.Usage
+			if params.Turn.Usage != nil {
+				usage := observability.Usage{InputTokens: params.Turn.Usage.InputTokens, OutputTokens: params.Turn.Usage.OutputTokens, CachedInputTokens: params.Turn.Usage.CachedInputTokens, ReasoningOutputTokens: params.Turn.Usage.ReasoningOutputTokens, TotalTokens: params.Turn.Usage.TotalTokens}
+				terminalUsage = &usage
+			} else if lastSnapshot != nil {
+				snapshot := *lastSnapshot
+				terminalUsage = &snapshot
+			}
+			a.observation.CloseProtocol(terminalUsage, turnErr)
+		}
+		if goal {
+			a.mu.Lock()
+			terminal, goalErr := a.goalTerminal, a.goalErr
+			if !terminal {
+				a.awaitingContinuation = true
+			}
+			a.mu.Unlock()
+			if terminal {
+				r.finish(a, goalErr)
+			}
+			return
+		}
+		if turnErr == nil {
 			r.finish(a, nil)
 		} else {
-			r.finish(a, fmt.Errorf("turn completed with status %q", params.Turn.Status))
+			r.finish(a, turnErr)
 		}
 		return
 	}
@@ -476,6 +1002,50 @@ func (r *Runtime) routeAttempt(a *attempt, event Event) {
 	select {
 	case a.progress <- struct{}{}:
 	default:
+	}
+}
+
+func usageSnapshot(payload json.RawMessage) (observability.Usage, bool) {
+	var params struct {
+		TokenUsage struct {
+			Total *struct {
+				InputTokens           int64 `json:"inputTokens"`
+				OutputTokens          int64 `json:"outputTokens"`
+				CachedInputTokens     int64 `json:"cachedInputTokens"`
+				ReasoningOutputTokens int64 `json:"reasoningOutputTokens"`
+				TotalTokens           int64 `json:"totalTokens"`
+			} `json:"total"`
+		} `json:"tokenUsage"`
+	}
+	if json.Unmarshal(payload, &params) != nil || params.TokenUsage.Total == nil {
+		return observability.Usage{}, false
+	}
+	return observability.Usage{InputTokens: params.TokenUsage.Total.InputTokens, OutputTokens: params.TokenUsage.Total.OutputTokens, CachedInputTokens: params.TokenUsage.Total.CachedInputTokens, ReasoningOutputTokens: params.TokenUsage.Total.ReasoningOutputTokens, TotalTokens: params.TokenUsage.Total.TotalTokens}, true
+}
+
+// isContinuationTurnEvidence is limited to App Server events that identify an
+// actual Turn. After a known Goal turn completes, some App Server versions may
+// emit the next turn's item events before (or without) turn/started. Binding
+// only at that completed boundary keeps unrelated same-thread events isolated.
+func isContinuationTurnEvidence(event Event) bool {
+	switch event.Method {
+	case "turn/completed":
+		var params struct {
+			Turn struct {
+				ID string `json:"id"`
+			} `json:"turn"`
+		}
+		return json.Unmarshal(event.Params, &params) == nil && params.Turn.ID != ""
+	case "item/started", "item/completed":
+		var params struct {
+			Item struct {
+				ID   string `json:"id"`
+				Type string `json:"type"`
+			} `json:"item"`
+		}
+		return json.Unmarshal(event.Params, &params) == nil && params.Item.ID != "" && params.Item.Type == "agentMessage"
+	default:
+		return false
 	}
 }
 
@@ -524,8 +1094,17 @@ func (r *Runtime) finish(a *attempt, err error) {
 	}
 	bound := a.boundLocked()
 	a.finished = true
+	for _, state := range a.toolCalls {
+		if !state.handlerStarted {
+			state.terminal = true
+		}
+	}
 	cancel := a.cancel
+	observation := a.observation
 	a.mu.Unlock()
+	if observation != nil {
+		observation.CloseProtocol(nil, err)
+	}
 	if cancel != nil {
 		cancel()
 	}

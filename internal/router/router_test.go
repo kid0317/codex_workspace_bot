@@ -51,6 +51,9 @@ func TestHandleGoalPersistsOnlyRedactedReceiptMetadata(t *testing.T) {
 	if store.input.UserContent != "/goal [redacted]" || store.input.CommandKind != "goal" || store.input.CommandPayloadSHA256 == "" || store.input.CommandPayloadBytes != len("sentinel-private-objective") || !store.input.ReceivedAt.Equal(receivedAt) {
 		t.Fatalf("goal receipt = %#v", store.input)
 	}
+	if !dispatcher.job.Goal || dispatcher.job.Query != "sentinel-private-objective" {
+		t.Fatalf("goal job = %#v", dispatcher.job)
+	}
 }
 
 type fakeStore struct {
@@ -76,6 +79,9 @@ func (s *fakeStore) FailMessage(_ context.Context, _ string, _ string, _ string,
 	return nil
 }
 func (s *fakeStore) CompleteMessage(context.Context, string, string, string, int64) error { return nil }
+func (s *fakeStore) RecordCommandReplyFailure(context.Context, string, string, string, string) error {
+	return nil
+}
 
 type fakeDispatcher struct {
 	job worker.Message
@@ -126,6 +132,9 @@ func TestHandleGroupTextQueuesByChatID(t *testing.T) {
 	}
 	if dispatcher.job.Reply != (worker.ReplyTarget{ID: "oc_group", Type: "chat_id"}) {
 		t.Fatalf("reply = %#v", dispatcher.job.Reply)
+	}
+	if dispatcher.job.Actor.OpenID != "ou_user" {
+		t.Fatalf("actor = %#v", dispatcher.job.Actor)
 	}
 }
 

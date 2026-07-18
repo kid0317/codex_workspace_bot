@@ -22,15 +22,18 @@ import (
 type Client interface {
 	SendCurrentText(context.Context, worker.ReplyTarget, string) (string, error)
 	UploadAndSend(context.Context, worker.ReplyTarget, *os.File, string) (fileKey, messageID string, err error)
-	CreateDocumentAndAnnounce(context.Context, worker.ReplyTarget, string, []byte) (worker.DocumentOutcome, error)
+	CreateDocumentAndAnnounce(context.Context, worker.ReplyTarget, string, string, []byte) (worker.DocumentOutcome, error)
 	ReadDocument(context.Context, string) (string, error)
 }
 
 type Route struct {
 	AppID, ChannelKey, ChatGroupID string
 	Reply                          worker.ReplyTarget
-	WorkspaceDir                   string
-	OutboxDir                      string
+	// OwnerOpenID is copied from the ingress actor. It is never supplied by
+	// dynamic-tool arguments and must not be logged or persisted by this layer.
+	OwnerOpenID  string
+	WorkspaceDir string
+	OutboxDir    string
 }
 
 type Ledger interface {
@@ -182,6 +185,9 @@ func (s Service) execute(ctx context.Context, route Route, call codexapp.ToolCal
 		if !decodeArguments(call.Arguments, &args) || args.MarkdownRef == "" || args.Title == "" || len(args.Title) > 800 {
 			return actionResult(toolFailure("document parameters are invalid"), storage.ActionRejected, claimed)
 		}
+		if route.OwnerOpenID == "" {
+			return actionResult(toolFailure("document owner is unavailable for this message"), storage.ActionRejected, claimed)
+		}
 		max := s.MaxMarkdownBytes
 		if max <= 0 {
 			max = 2_000_000
@@ -193,14 +199,14 @@ func (s Service) execute(ctx context.Context, route Route, call codexapp.ToolCal
 		if result, ok := startExternal(); !ok {
 			return actionResult(result, storage.ActionUnknown, claimed)
 		}
-		outcome, err := client.CreateDocumentAndAnnounce(ctx, route.Reply, args.Title, markdown)
+		outcome, err := client.CreateDocumentAndAnnounce(ctx, route.Reply, route.OwnerOpenID, args.Title, markdown)
 		if err != nil {
 			return actionResult(toolFailure("document could not be created"), actionExternalFailureState(err), claimed)
 		}
-		if outcome.URL == "" || outcome.AnnouncementOutcome == "" {
+		if outcome.URL == "" || outcome.AnnouncementOutcome == "" || outcome.OwnerTransferOutcome == "" {
 			return actionResult(toolFailure("document outcome was invalid"), storage.ActionUnknown, claimed)
 		}
-		result, marshalErr := json.Marshal(map[string]any{"url": outcome.URL, "content_written": outcome.ContentWritten, "announcement_outcome": outcome.AnnouncementOutcome})
+		result, marshalErr := json.Marshal(map[string]any{"url": outcome.URL, "content_written": outcome.ContentWritten, "announcement_outcome": outcome.AnnouncementOutcome, "owner_transferred": outcome.OwnerTransferred, "owner_transfer_outcome": outcome.OwnerTransferOutcome})
 		if marshalErr != nil {
 			return actionResult(toolFailure("document result could not be prepared"), storage.ActionUnknown, claimed)
 		}

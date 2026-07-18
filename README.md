@@ -1,87 +1,251 @@
 # Codex Workspace Bot
 
-本项目是本机自用的 Codex + 飞书工作区 Bot。S01/S02 已交付；S03 将同一条 Worker 主链路接到本 bot 独占的真实 Codex App Server stdio child，而不再回显模拟请求参数。
+Codex Workspace Bot 是一个本机自用的飞书 Bot 编排器：用户在飞书单聊或群聊中发消息，Bot 按飞书 App 和频道找到对应的本机工作区，驱动长期运行的 `codex app-server --stdio` 执行任务，并把结果回传到飞书。
 
-## 本机启动
+它不是公开 SaaS，也不是通用聊天 Webhook 服务。当前设计重点是个人本机、多飞书 App、多 workspace、同频道串行、MySQL 可追溯和 Codex 原生运行。
 
-前置条件：Docker Compose、Go 1.23 或以上、已登录的 `codex` CLI，以及一个可用的本地配置文件。先以 `codex login` 完成本机登录；若启动期 `initialize` 失败，修复登录/CLI/本机环境后重启 bot，不会自动循环重启。
+## 功能概览
 
-1. 创建本机环境文件与服务配置（这两个文件已被 Git 忽略）：
+- 飞书 WebSocket 接入，支持多个自建应用的 p2p/group 文本消息。
+- 一个长期 Codex App Server 子进程服务多个 workspace。
+- 同一飞书频道严格 FIFO，不同频道并行处理。
+- `work` 模式使用飞书卡片展示进展和最终正文。
+- `companion` 模式只在成功终态后按 `[[SEND]]` 分段发送纯文本。
+- 支持 `/help`、`/status`、`/cancel`、`/stop`、`/new`、`/goal <目标>`。
+- 支持附件输入、当前频道消息发送、飞书文档创建/读取、图片/文件发送。
+- 支持 Agent 管理当前 App/频道/用户范围内的 Cron Prompt 和本机 Shell Script 定时任务。
+- 可选接入自托管 Langfuse，记录明文业务 Trace；运行凭据仍会被剥离。
+
+## 文档
+
+- [文档索引](docs/README.md)
+- [需求分析](docs/00-requirements-analysis.md)
+- [PRD](docs/03-product-requirements.md)
+- [概要设计](docs/02-redesign-high-level.md)
+- [Story List](docs/story/STORY_LIST.md)
+- [开源安全清单](docs/open-source-readiness.md)
+
+## 依赖
+
+| 依赖 | 是否必需 | 说明 |
+|---|---|---|
+| Go 1.23+ | 必需 | 构建 `cmd/server` 和 `cmd/appctl`。 |
+| Codex CLI | 必需 | 需要先在本机执行 `codex login`。 |
+| Docker / Docker Compose | 必需 | 本仓库提供 MySQL compose 服务。 |
+| MySQL 8.4 | 必需 | 默认由 `docker-compose.yml` 启动。 |
+| 飞书自建应用 | 必需 | 需要长连接、事件订阅和消息发送权限。 |
+| Langfuse | 可选 | 只在启用 `observability.langfuse.enabled` 时需要。 |
+| Redis | 不需要 | 当前默认架构是 MySQL + 进程内队列。 |
+
+## 配置文件
+
+真实配置文件不能提交到仓库。请从模板复制：
+
+```bash
+cp .env.example .env
+cp config.yaml.template config.yaml
+```
+
+需要填写：
+
+- `.env`
+  - `MYSQL_ROOT_PASSWORD`
+  - `CODEX_WORKSPACE_BOT_DB_PASSWORD`
+  - `CODEX_WORKSPACE_BOT_ATTACHMENT_KEY_V1`
+  - `CODEX_WORKSPACE_BOT_ACTION_RESULT_KEY_V1`
+  - 如启用定时任务：`CODEX_WORKSPACE_BOT_SCHEDULE_PAYLOAD_KEY_V1`、`CODEX_WORKSPACE_BOT_SCHEDULE_OWNER_HMAC_KEY_V1`
+  - 如启用 Langfuse：`LANGFUSE_PUBLIC_KEY`、`LANGFUSE_SECRET_KEY`
+- `config.yaml`
+  - MySQL 地址、库名、用户和 `password_env`
+  - Codex 命令和超时
+  - 附件目录和大小限制
+  - `feishu_actions.enabled`
+  - `schedule.enabled`、`scripts.enabled`
+  - 可选 Langfuse Project 绑定信息
+
+生成 32 字节 base64 key：
+
+```bash
+openssl rand -base64 32
+```
+
+这些 key 应保持稳定；不要每次启动重新生成，否则旧的附件引用、action 结果或历史调度数据可能无法读取。
+
+## 飞书应用准备
+
+在飞书开放平台创建企业自建应用，并至少准备：
+
+- 启用长连接。
+- 订阅 `im.message.receive_v1`。
+- 授予接收单聊/群聊消息、发送消息所需权限。
+- 如使用卡片和文档能力，补充 interactive card、文件、图片、docx/Drive 相关权限。
+- 把 Bot 加入需要使用的测试群，或在单聊中打开会话。
+
+应用的 `App ID` 和 `App Secret` 不写入 YAML，而是通过 `appctl` 写入本机 MySQL。
+
+## Quick Start
+
+1. 登录 Codex CLI：
 
    ```bash
-   cp .env.example .env
-   cp config.yaml.template config.yaml
+   codex login
    ```
 
-   在 `.env` 中设置 `MYSQL_ROOT_PASSWORD`、`CODEX_WORKSPACE_BOT_DB_PASSWORD`，以及 S05 的两个稳定 AES-256 key（各执行一次 `openssl rand -base64 32` 后保存；不要每次启动重新生成）：
+2. 加载本机环境变量：
 
    ```bash
-   set -a; . ./.env; set +a
+   set -a
+   . ./.env
+   set +a
    ```
 
-2. 启动持久化 MySQL。数据库文件挂载在 `runtime/mysql-data/`；容器使用 `restart: unless-stopped`，机器重启后 Docker 服务启动时会自动恢复。
+3. 启动 MySQL：
 
    ```bash
    docker compose up -d mysql
    docker compose ps
    ```
 
-3. 从旧 CC Workspace Bot 配置导入一个应用。命令不会打印 Secret：
+4. 创建一个 Bot App 配置：
+
+   ```bash
+   go run ./cmd/appctl create \
+     --config ./config.yaml \
+     --name my-bot \
+     --app-id cli_xxx \
+     --secret replace-with-feishu-app-secret \
+     --workspace-dir /absolute/path/to/workspace \
+     --model gpt-5 \
+     --effort medium \
+     --enabled=true
+   ```
+
+   也可以从旧本机配置导入：
 
    ```bash
    go run ./cmd/appctl import-legacy-app \
      --config ./config.yaml \
-     --legacy-config /root/cc_workspace_bot/config.yaml \
-     --name health-assistant
+     --legacy-config /absolute/path/to/old/config.yaml \
+     --name my-bot
    ```
 
-4. 启动服务。启动时会幂等执行 `migrations/001_initial.sql`，创建并完成本 bot 独占 App Server child 的 `initialize`，随后才连接飞书 receiver：
+5. 构建并启动服务：
 
    ```bash
-   go run ./cmd/server --config ./config.yaml
+   ./bot_controller.sh build
+   ./bot_controller.sh start
    ```
 
-5. 在另一个终端验证本机服务：
+6. 验证服务：
 
    ```bash
    curl --fail http://127.0.0.1:8080/healthz
+   curl --fail http://127.0.0.1:8080/readyz
    ```
 
-   预期返回 `ok`。
+   `healthz` 预期返回 `ok`。`readyz` 应显示 Codex App Server 和 enabled 飞书 receiver 的状态。
 
-## 日志
+7. 在飞书中发送 `/status` 或普通文本消息，确认 Bot 能回复。
 
-服务自行管理日志，无需配置 `cron` 或 `logrotate`：
+## 运行控制
 
-- 普通服务日志：`logs/server.log`
-- 工作流日志（为后续 Worker/App Server 预留）：`logs/server.log.wf`
-- 每小时切分为 `server-YYYYMMDDHH.log` 与对应 `.wf` 文件。
-- 服务后台任务会把早于今天的已切分日志移至 `logs/YYYYMMDD/`；服务重启后也会补偿执行。
+本项目的本地服务必须使用仓库根目录的 `bot_controller.sh` 管理：
 
-配置示例：
-
-```yaml
-logging:
-  level: info # debug | info | error
-  dir: logs
+```bash
+./bot_controller.sh build
+./bot_controller.sh start
+./bot_controller.sh restart
+./bot_controller.sh stop
 ```
 
-`logging.level=debug` 是 S03 的本机验收开关。每个 child generation 会在 `logs/` 写入三份同步证据：
+不要用 `nohup`、shell 后台命令或直接执行 `runtime/codex_workspace_bot` 替代它。控制脚本会构建到 `runtime/codex_workspace_bot`，用 user systemd 启动服务，并在停止时给 Bot 和它管理的 App Server 子进程发送优雅终止。
 
-- `appserver-raw-<process-start>.ndjson`：完整 server→client 原始 JSON-RPC 行；
-- `appserver-event-<process-start>.jsonl`：dispatch 前的分类、路由快照与 `seq`；
-- `appserver-outcome-<process-start>.jsonl`：同一 `seq` 的 dispatch 结果。
+## App 管理
 
-它们只用于当前本机调试，不会发送到飞书、MySQL 或 Langfuse。测试完成后把级别改回 `info`；运行中 replacement 初始化失败时，新的入站消息会被持久化为 `app_server_unavailable` 并获得固定失败文案，人工修复后重启服务。
+```bash
+go run ./cmd/appctl list --config ./config.yaml
+go run ./cmd/appctl enable --config ./config.yaml --name my-bot
+go run ./cmd/appctl disable --config ./config.yaml --name my-bot
+go run ./cmd/appctl update --config ./config.yaml --name my-bot --app-id cli_xxx --secret replace-with-secret --workspace-dir /abs/ws --model gpt-5 --effort medium
+go run ./cmd/appctl delete --config ./config.yaml --name my-bot
+```
+
+`list` 不会输出 App Secret。修改 App 配置后，重启服务使 receiver 配置生效。
+
+## 定时任务
+
+默认 `schedule.enabled=false`。启用前需要：
+
+1. 在 `.env` 填写 schedule 相关 key。
+2. 在 `config.yaml` 设置：
+
+   ```yaml
+   schedule:
+     enabled: true
+   ```
+
+3. 如需允许 Script 任务，再设置：
+
+   ```yaml
+   scripts:
+     enabled: true
+     shell_path: "/bin/sh"
+   ```
+
+Script 会在对应 App 的 `workspace_dir` 下，以 Bot 当前 OS 用户执行 `shell_path -c command`。这是个人本机能力，不适合作为公开多用户执行环境。
+
+## Langfuse
+
+Langfuse 是可选依赖。启用前建议在自托管 Langfuse 中新建独立 Project，不复用旧项目 Key。填写 `.env` 中的 `LANGFUSE_PUBLIC_KEY`、`LANGFUSE_SECRET_KEY`，并在 `config.yaml` 中启用：
+
+```yaml
+observability:
+  langfuse:
+    enabled: true
+    base_url: "https://langfuse.example.local"
+    public_key_env: "LANGFUSE_PUBLIC_KEY"
+    secret_key_env: "LANGFUSE_SECRET_KEY"
+    project_id: "your-project-id"
+    project_binding_nonce: "manual-readback-nonce"
+    project_binding_verified: true
+```
+
+本项目的 Langfuse 策略是记录明文业务数据，便于个人排障；唯一禁止记录的是运行凭据，例如飞书 Key、Langfuse Key、Authorization、Cookie、access token、数据库密码和进程环境 secret。
 
 ## 本地验证
 
+常规验证：
+
 ```bash
+go test ./... -count=1
 go vet ./...
-go test ./...
-go test -race ./internal/...
+go build ./cmd/server ./cmd/appctl
 ```
 
-S04 已交付 work/companion 输出：work 使用同一 CardKit entity 的全量 `Card.Update(card_json)` 更新进展与正文；若单次实体更新失败，只对该次同一 message 降级 PATCH，后续更新仍继续尝试 CardKit。companion 不创建卡片，只在成功终态后按 `[[SEND]]` 发送 plain-text 分段。`/cancel`/`/stop` 通过 TerminalArbiter 与 DeliverySlot 阻止尚未发布的 companion 首段，并等待交付槽收尾；workflow JSONL 写入失败会停止后续段并留下稳定失败状态。
+并发敏感改动建议补充：
 
-S05 已交付：image/file 会先按原会话 FIFO 下载，再把实际本机路径交给 App Server；图片另以 `localImage` 传入。个人本机模式不设目录白名单或显式附件 chmod：`attachments.root_dir` 可为相对或绝对路径，当前会话的文件上传与 Markdown 文档创建可读取任意本机普通文件。文件发送会按内容签名识别 JPEG、PNG、GIF、WEBP、TIFF、BMP、ICO：符合飞书 image API 且不超过 10 MB 时发送为原生图片，其他内容发送为文件。当前会话的受控动态 action 还支持发消息、创建并公告 Markdown 飞书文档，以及读取当前 App 有权访问的 docx 文档。仍保留非空文件、regular-file、30 MB 上限和当前会话回复目标约束。附件 retention 会在启动及每小时执行；动态 action 结果使用 `.env` 中的稳定 key 加密缓存。
+```bash
+go test -race ./internal/worker ./internal/codexapp ./internal/schedule -count=1
+```
+
+控制脚本验证：
+
+```bash
+bash scripts/test_bot_controller.sh
+```
+
+真实飞书、真实 Codex App Server 和 Langfuse read-back 属于外部集成验收，需要用本机凭据单独执行并记录证据。
+
+## 开源安全
+
+提交前确认以下文件没有被 git 跟踪：
+
+```bash
+git ls-files .env config.yaml runtime logs .codex-workspace-bot graphify-out
+```
+
+这些路径已经在 `.gitignore` 中排除。更完整的检查见 [开源安全清单](docs/open-source-readiness.md)。
+
+## 许可证
+
+当前仓库尚未指定开源许可证。正式公开前请补充 `LICENSE`，并在本节写明许可类型。

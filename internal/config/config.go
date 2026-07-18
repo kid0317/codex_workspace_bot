@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"net"
 	"os"
-	"sort"
 	"strings"
 	"time"
 
@@ -21,6 +20,32 @@ type Config struct {
 	Streaming     StreamingConfig     `yaml:"streaming"`
 	Attachments   AttachmentsConfig   `yaml:"attachments"`
 	FeishuActions FeishuActionsConfig `yaml:"feishu_actions"`
+	Schedule      ScheduleConfig      `yaml:"schedule"`
+	Scripts       ScriptsConfig       `yaml:"scripts"`
+	Observability ObservabilityConfig `yaml:"observability"`
+}
+
+type ObservabilityConfig struct {
+	Langfuse LangfuseConfig `yaml:"langfuse"`
+}
+
+// LangfuseConfig intentionally lets the server start in a degraded no-op mode
+// if optional observability credentials are absent or invalid. It must never
+// cause a valid personal-local Feishu ingress to stop accepting work.
+type LangfuseConfig struct {
+	Enabled                bool   `yaml:"enabled"`
+	BaseURL                string `yaml:"base_url"`
+	BaseURLEnv             string `yaml:"base_url_env"`
+	PublicKeyEnv           string `yaml:"public_key_env"`
+	SecretKeyEnv           string `yaml:"secret_key_env"`
+	ProjectID              string `yaml:"project_id"`
+	ProjectBindingNonce    string `yaml:"project_binding_nonce"`
+	ProjectBindingVerified bool   `yaml:"project_binding_verified"`
+	Environment            string `yaml:"environment"`
+	ExportTimeoutSeconds   int    `yaml:"export_timeout_seconds"`
+	MaxQueueSize           int    `yaml:"max_queue_size"`
+	PublicKey              string `yaml:"-"`
+	SecretKey              string `yaml:"-"`
 }
 
 type KeyConfig struct {
@@ -44,6 +69,31 @@ type FeishuActionsConfig struct {
 	DefaultDocFolderToken string      `yaml:"default_doc_folder_token"`
 	ActionTimeoutSeconds  int         `yaml:"action_timeout_seconds"`
 	ResultKeys            []KeyConfig `yaml:"result_keys"`
+}
+
+// ScheduleConfig is disabled by default so existing installations do not
+// accidentally start a scheduler. Once enabled, both independent keyrings are
+// mandatory and all task execution is scoped by these limits.
+type ScheduleConfig struct {
+	Enabled                  bool        `yaml:"enabled"`
+	TickIntervalMS           int         `yaml:"tick_interval_ms"`
+	MisfireGraceSeconds      int         `yaml:"misfire_grace_seconds"`
+	MaxEnabledTasksPerOwner  int         `yaml:"max_enabled_tasks_per_owner"`
+	MaxEnabledTasksPerApp    int         `yaml:"max_enabled_tasks_per_app"`
+	MaxPromptDispatchPerTick int         `yaml:"max_prompt_dispatch_per_tick"`
+	PayloadKeys              []KeyConfig `yaml:"payload_keys"`
+	OwnerHMACKeys            []KeyConfig `yaml:"owner_hmac_keys"`
+}
+
+// ScriptsConfig controls direct local script commands scheduled by the bot.
+// Commands run as the same OS user as the bot process; no descriptor registry,
+// privilege drop, or network sandbox is involved in this personal-local mode.
+type ScriptsConfig struct {
+	Enabled        bool   `yaml:"enabled"`
+	ShellPath      string `yaml:"shell_path"`
+	TimeoutSeconds int    `yaml:"timeout_seconds"`
+	MaxOutputBytes int64  `yaml:"max_output_bytes"`
+	MaxConcurrent  int    `yaml:"max_concurrent"`
 }
 
 type WorkerConfig struct {
@@ -194,6 +244,42 @@ func applyDefaults(cfg *Config) {
 	if cfg.FeishuActions.ActionTimeoutSeconds == 0 {
 		cfg.FeishuActions.ActionTimeoutSeconds = 20
 	}
+	if cfg.Schedule.TickIntervalMS == 0 {
+		cfg.Schedule.TickIntervalMS = 1000
+	}
+	if cfg.Schedule.MisfireGraceSeconds == 0 {
+		cfg.Schedule.MisfireGraceSeconds = 60
+	}
+	if cfg.Schedule.MaxEnabledTasksPerOwner == 0 {
+		cfg.Schedule.MaxEnabledTasksPerOwner = 100
+	}
+	if cfg.Schedule.MaxEnabledTasksPerApp == 0 {
+		cfg.Schedule.MaxEnabledTasksPerApp = 1000
+	}
+	if cfg.Schedule.MaxPromptDispatchPerTick == 0 {
+		cfg.Schedule.MaxPromptDispatchPerTick = 20
+	}
+	if cfg.Scripts.ShellPath == "" {
+		cfg.Scripts.ShellPath = "/bin/sh"
+	}
+	if cfg.Scripts.TimeoutSeconds == 0 {
+		cfg.Scripts.TimeoutSeconds = 300
+	}
+	if cfg.Scripts.MaxOutputBytes == 0 {
+		cfg.Scripts.MaxOutputBytes = 24 * 1024
+	}
+	if cfg.Scripts.MaxConcurrent == 0 {
+		cfg.Scripts.MaxConcurrent = 2
+	}
+	if cfg.Observability.Langfuse.ExportTimeoutSeconds == 0 {
+		cfg.Observability.Langfuse.ExportTimeoutSeconds = 2
+	}
+	if cfg.Observability.Langfuse.MaxQueueSize == 0 {
+		cfg.Observability.Langfuse.MaxQueueSize = 4096
+	}
+	if cfg.Observability.Langfuse.Environment == "" {
+		cfg.Observability.Langfuse.Environment = "development"
+	}
 }
 
 func validate(cfg *Config) error {
@@ -215,6 +301,13 @@ func validate(cfg *Config) error {
 	cfg.Database.Password = os.Getenv(cfg.Database.PasswordEnv)
 	if cfg.Database.Password == "" {
 		return fmt.Errorf("config: environment variable %s is required", cfg.Database.PasswordEnv)
+	}
+	if cfg.Observability.Langfuse.Enabled {
+		if cfg.Observability.Langfuse.BaseURL == "" && cfg.Observability.Langfuse.BaseURLEnv != "" {
+			cfg.Observability.Langfuse.BaseURL = os.Getenv(cfg.Observability.Langfuse.BaseURLEnv)
+		}
+		cfg.Observability.Langfuse.PublicKey = os.Getenv(cfg.Observability.Langfuse.PublicKeyEnv)
+		cfg.Observability.Langfuse.SecretKey = os.Getenv(cfg.Observability.Langfuse.SecretKeyEnv)
 	}
 	if cfg.Database.Port < 1 || cfg.Database.Port > 65535 {
 		return fmt.Errorf("config: database port is invalid")
@@ -248,6 +341,34 @@ func validate(cfg *Config) error {
 			return err
 		}
 	}
+	if cfg.Schedule.Enabled {
+		if cfg.Schedule.TickIntervalMS < 100 || cfg.Schedule.TickIntervalMS > 60_000 {
+			return fmt.Errorf("config: schedule tick_interval_ms must be between 100 and 60000")
+		}
+		if cfg.Schedule.MisfireGraceSeconds < 1 || cfg.Schedule.MisfireGraceSeconds > 3600 {
+			return fmt.Errorf("config: schedule misfire_grace_seconds must be between 1 and 3600")
+		}
+		if cfg.Schedule.MaxEnabledTasksPerOwner < 1 || cfg.Schedule.MaxEnabledTasksPerApp < cfg.Schedule.MaxEnabledTasksPerOwner || cfg.Schedule.MaxPromptDispatchPerTick < 1 {
+			return fmt.Errorf("config: schedule quotas are invalid")
+		}
+		if err := loadKeyring("schedule.payload_keys", cfg.Schedule.PayloadKeys); err != nil {
+			return err
+		}
+		if err := loadKeyring("schedule.owner_hmac_keys", cfg.Schedule.OwnerHMACKeys); err != nil {
+			return err
+		}
+	}
+	if cfg.Scripts.Enabled {
+		if !cfg.Schedule.Enabled {
+			return fmt.Errorf("config: scripts requires enabled schedule")
+		}
+		if err := validateScriptCapability(cfg.Scripts); err != nil {
+			return err
+		}
+	}
+	if cfg.Observability.Langfuse.ExportTimeoutSeconds < 1 || cfg.Observability.Langfuse.ExportTimeoutSeconds > 30 || cfg.Observability.Langfuse.MaxQueueSize < 1 || cfg.Observability.Langfuse.MaxQueueSize > 65536 {
+		return fmt.Errorf("config: observability langfuse limits are invalid")
+	}
 	if _, _, err := net.SplitHostPort(cfg.Server.ListenAddr); err != nil {
 		return fmt.Errorf("config: server listen_addr: %w", err)
 	}
@@ -256,7 +377,7 @@ func validate(cfg *Config) error {
 
 func loadKeyring(name string, keys []KeyConfig) error {
 	if len(keys) == 0 {
-		return fmt.Errorf("config: %s is required when feishu_actions is enabled", name)
+		return fmt.Errorf("config: %s is required", name)
 	}
 	seen := make(map[int]struct{}, len(keys))
 	for i := range keys {
@@ -278,8 +399,22 @@ func loadKeyring(name string, keys []KeyConfig) error {
 		}
 		key.Key = decoded
 	}
-	sort.Slice(keys, func(i, j int) bool { return keys[i].Version < keys[j].Version })
 	return nil
+}
+
+func validateScriptCapability(cfg ScriptsConfig) error {
+	if !strings.HasPrefix(cfg.ShellPath, "/") || !isRegularExecutable(cfg.ShellPath) {
+		return fmt.Errorf("config: scripts shell_path must be an absolute executable regular file")
+	}
+	if cfg.TimeoutSeconds < 1 || cfg.TimeoutSeconds > 1800 || cfg.MaxOutputBytes < 1 || cfg.MaxOutputBytes > 64*1024 || cfg.MaxConcurrent < 1 {
+		return fmt.Errorf("config: scripts limits are invalid")
+	}
+	return nil
+}
+
+func isRegularExecutable(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && info.Mode().IsRegular() && info.Mode().Perm()&0o111 != 0
 }
 
 func (c DatabaseConfig) DSN() string {

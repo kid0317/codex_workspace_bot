@@ -120,3 +120,23 @@ func TestTimelineWritesFixedSchemaAndExplicitNullError(t *testing.T) {
 		t.Fatalf("outcome must explicitly contain null error: %s", outcome)
 	}
 }
+
+func TestTimelineRedactsRegisteredGoalFirstUserMessage(t *testing.T) {
+	dir := t.TempDir()
+	timeline, err := codexapp.NewTimeline(dir, "goal", func(codexapp.Event) map[string]any { return nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	timeline.RegisterGoalThread("thread-goal")
+	if _, err := timeline.RecordRaw([]byte(`{"jsonrpc":"2.0","method":"item/completed","params":{"threadId":"thread-goal","turnId":"turn-1","item":{"id":"input-1","type":"userMessage","content":[{"type":"inputText","text":"sentinel-goal-secret"}]}}}`)); err != nil {
+		t.Fatal(err)
+	}
+	_ = timeline.Close()
+	raw, err := os.ReadFile(filepath.Join(dir, "appserver-raw-goal.ndjson"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), "sentinel-goal-secret") || !strings.Contains(string(raw), "sha256=") {
+		t.Fatalf("goal raw = %s", raw)
+	}
+}

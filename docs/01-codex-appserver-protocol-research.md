@@ -1,7 +1,7 @@
 # Codex App Server 协议调研
 
 > **版本**: v1.0 | **日期**: 2026-07-10
-> **Codex CLI**: 0.144.1（最新）/ 0.143.0（本地）
+> **Codex CLI**: 0.144.1 / 0.143.0（调研时验证版本）
 > **目的**: 为 cc_workspace_bot → codex_workspace_bot 重写提供协议层设计依据
 
 ---
@@ -346,6 +346,17 @@ Thread = 一段完整的对话上下文。类似 Claude 的 session，但由 App
 | `thread/goal/get` | 获取线程目标 |
 | `thread/goal/clear` | 清除线程目标 |
 | `thread/metadata/update` | 更新元数据 |
+
+### 5.3.1 Goal 与首个 Turn（2026-07-13 官方语义校正）
+
+`thread/goal/set`、`thread/goal/get` 与 `thread/goal/clear` 管理的是 Codex TUI `/goal` 所呈现的同一份持久 Thread Goal；它们本身不替代 `turn/start`。官方 long-running work 定义 `/goal` 的目标文本同时是**首个 prompt**与**完成条件**，因此嵌入式客户端实现“设置并立即开始”时必须：
+
+1. 确保 Thread 已 start/resume；
+2. `thread/goal/set {threadId, objective, status:"active", tokenBudget?}`；
+3. 以同一 objective 调用 `turn/start`；
+4. 在 `goal/set` 前注册 thread 级 Goal owner；将不带单一 turnId 的 `thread/goal/updated` 与该 Thread 的连续 `turn/started` / `turn/completed` 共同关联，直到 Goal 的 complete、paused 或 budget-limited 终态。
+
+Goal continuation 是 App Server 在安全边界触发的事件驱动机制，客户端不得用无限循环伪造；但也不得把首个 `turn/completed` 误判为 Goal 完成。客户端必须为乱序的首 `turn/start` response、`turn/started`、`turn/completed` 与 terminal goal update 建立 generation/terminal fence，且取消必须先暂停 Goal、再 interrupt/drain Turn。目标最大 4,000 Unicode code point；新 objective 会替换旧目标并重置 Goal usage accounting。
 
 ### 5.4 thread/start 完整参数
 
@@ -803,6 +814,10 @@ Bot 的 Approval Broker 处理
 | `currentTime/read` | 读取客户端时钟 | 时间响应 |
 | `applyPatchApproval` *(DEPRECATED)* | 旧版补丁审批 | `{decision}` |
 | `execCommandApproval` *(DEPRECATED)* | 旧版命令审批 | `{decision}` |
+
+对于 namespace dynamic tool，App Server 的 `item/tool/call.tool` 是 namespace-local 名（例如 `create`），而不是展示给 Agent 的完整产品名 `schedule.create`。服务端必须仅在 exact attempt 的已注册 namespace 中把 local name canonicalize 为完整名；不得将 bare name 作为独立的公开产品工具或路由到其他 namespace。
+
+S06 的 `schedule` tool 返回值及未来执行 Prompt 的语义由本地 MySQL task/run 真相源承载；在当前个人本地部署中，这些 task/run payload 选择明文保存，供运行排障直接检查。该存储决定不改变 App Server JSON-RPC 协议，也不放宽飞书凭据、token、原始消息正文和日志脱敏边界。
 
 ### 8.3 审批策略（AskForApproval）
 

@@ -31,10 +31,10 @@
 
 1. 更新并校验配置模板/环境变量/迁移/初始化数据。
 2. 运行相关测试和 `go vet ./...`。
-3. 停止旧实例。
+3. 使用 `./bot_controller.sh build` 构建本服务；不得手写 `go build` 后直接运行二进制作为运行时验证路径。
 4. 应用迁移与数据导入。
-5. 启动新实例。
-6. 记录新实例时间/版本，检查 `/healthz` 和（若有）`/readyz`。
+5. 已有实例使用 `./bot_controller.sh restart`，未运行时使用 `./bot_controller.sh start`；不得使用 shell 后台命令、`nohup`、手写 `systemd-run` 或直接执行 runtime 二进制。
+6. 记录脚本启动的新实例时间/版本，检查 `/healthz` 和（若有）`/readyz`。脚本停止时必须让 Bot 主进程对在途 Turn 执行 `/cancel`/`turn/interrupt`，再关闭其专属 App Server；不得全局杀死其他 Codex App Server。
 7. 用数据库查询确认 migration 版本、启用配置和关键状态。
 8. 只有上述全部成立，才能请用户验证；绝不让用户验证旧进程。
 
@@ -54,7 +54,7 @@
 
 ## 6. 每次 Delivered 后的强制复盘
 
-1. 写 `docs/story/Sxx-全过程复盘-YYYY-MM-DD.md`。
+1. 写 `docs/archive/story-retrospectives/Sxx-全过程复盘-YYYY-MM-DD.md`。
 2. 从会话记录、diff、测试、运行日志、DB、评审和用户纠偏还原时间线。
 3. 列出工具/运行操作、反复、踩坑、根因和残余风险；不写 Secret/正文。
 4. 分类每个问题：缺知识、缺 SOP、缺项目规则、缺工具、缺自动门禁或过期上下文。
@@ -93,3 +93,9 @@
 - 同一个“上传并发送”动作若会按内容分流到不同的外部 API（例如原生图片与普通文件），action ledger 的 `succeeded` 只能证明调用成功，不能替代对用户可见消息类型的 L4 验证；必须为每种呈现分支保留明确证据。
 - 运行时依赖的加密 key 不能只存在于一次性的父进程环境；重启前必须确认稳定本机配置/secret 已就绪，并记录旧密文是否仍可恢复。
 - 用户明确允许使用本次实现期内的历史真实成功记录时，可以将其纳入 Delivered 证据；需保留时间、外部边界和脱敏终态，且不得继续保留“尚未验证”的相反文档结论。
+
+## 12. S06 学到的不可违反规则
+
+- dynamic tool 的 `list → update` 链路必须把 list 返回的标识字段直接作为 update Schema 的标识字段，并用真实返回对象或等价回归测试覆盖；不得要求 Agent 猜测另一个内部字段名。
+- 任一 dynamic-tool Schema 改动必须递增持久 catalog version，并以 archive/start 取得新 Thread 后再把该 Thread 当成验收对象；只重启 bot 不能更新已 resume Thread 的工具描述。
+- 异步 worker/executor 的 run 状态必须先持久化为消费者允许的状态，再发布给可能立即开始的消费者；测试应在发布调用内同步启动消费者以覆盖该竞态。

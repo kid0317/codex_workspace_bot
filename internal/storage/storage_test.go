@@ -50,6 +50,32 @@ func TestS05MigrationDefinesAttachmentAndActionPersistence(t *testing.T) {
 	}
 }
 
+func TestS06MigrationDefinesScheduledTaskBoundaries(t *testing.T) {
+	body, err := os.ReadFile("../../migrations/005_s06_scheduled_tasks.sql")
+	if err != nil {
+		t.Fatalf("read S06 migration: %v", err)
+	}
+	for _, required := range []string{
+		"CREATE TABLE IF NOT EXISTS scheduled_tasks",
+		"CREATE TABLE IF NOT EXISTS scheduled_task_runs",
+		"CREATE TABLE IF NOT EXISTS scheduled_task_deliveries",
+		"CREATE TABLE IF NOT EXISTS scheduled_task_tool_calls",
+		"CREATE TABLE IF NOT EXISTS scheduled_script_definitions",
+		"codex_tool_catalog_version",
+		"catalog_upgrade_state",
+		"schedule_enabled",
+		"uk_scheduled_task_run_slot",
+		"uk_scheduled_task_delivery",
+		"uk_scheduled_task_tool_call",
+		"idx_scheduled_tasks_due",
+		"idx_scheduled_tasks_owner",
+	} {
+		if !strings.Contains(string(body), required) {
+			t.Fatalf("S06 migration missing %q", required)
+		}
+	}
+}
+
 func TestS10MigrationMakesAttachmentPathsUTF8MB4(t *testing.T) {
 	body, err := os.ReadFile("../../migrations/010_s05_attachment_relative_path_utf8mb4.sql")
 	if err != nil {
@@ -63,3 +89,5 @@ func TestS10MigrationMakesAttachmentPathsUTF8MB4(t *testing.T) {
 		if !strings.Contains(string(body), required) {
 			t.Fatalf("S10 migration missing %q", required)
 		}
+	}
+}

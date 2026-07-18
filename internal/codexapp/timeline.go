@@ -1,6 +1,7 @@
 package codexapp
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -17,6 +18,7 @@ type Timeline struct {
 	started             time.Time
 	raw, event, outcome *os.File
 	snapshot            func(Event) map[string]any
+	goalThreads         map[string]struct{}
 }
 
 func NewTimeline(dir, processStart string, snapshot func(Event) map[string]any) (*Timeline, error) {
@@ -41,7 +43,7 @@ func NewTimeline(dir, processStart string, snapshot func(Event) map[string]any) 
 		_ = event.Close()
 		return nil, err
 	}
-	return &Timeline{raw: raw, event: event, outcome: outcome, snapshot: snapshot, started: time.Now()}, nil
+	return &Timeline{raw: raw, event: event, outcome: outcome, snapshot: snapshot, started: time.Now(), goalThreads: make(map[string]struct{})}, nil
 }
 
 func (t *Timeline) Close() error {
@@ -77,10 +79,138 @@ func (t *Timeline) RecordRaw(raw []byte) (uint64, error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.seq++
-	if err := writeSync(t.raw, append(raw, '\n')); err != nil {
+	if err := writeSync(t.raw, append(t.redactGoalRaw(raw), '\n')); err != nil {
 		return 0, err
 	}
 	return t.seq, nil
+}
+
+// RegisterGoalThread must run before goal/set so raw responses and the first
+// echoed userMessage can be sanitized before they reach debug evidence.
+func (t *Timeline) RegisterGoalThread(threadID string) {
+	if threadID == "" {
+		return
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.goalThreads[threadID] = struct{}{}
+}
+
+func (t *Timeline) UnregisterGoalThread(threadID string) {
+	if threadID == "" {
+		return
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	delete(t.goalThreads, threadID)
+}
+
+func (t *Timeline) redactGoalRaw(raw []byte) []byte {
+	var value any
+	if json.Unmarshal(raw, &value) != nil {
+		return raw
+	}
+	redactObjectiveValue(value)
+	// A Goal first input may be echoed through a result-shaped or future event
+	// envelope that has no top-level threadId. Redact every userMessage payload
+	// before raw persistence rather than guessing that an unknown shape is safe.
+	redactUserMessageValues(value)
+	root, _ := value.(map[string]any)
+	if root == nil {
+		encoded, _ := json.Marshal(value)
+		return encoded
+	}
+	params, _ := root["params"].(map[string]any)
+	threadID, _ := params["threadId"].(string)
+	if _, goal := t.goalThreads[threadID]; goal {
+		if item, _ := params["item"].(map[string]any); item != nil {
+			if itemType, _ := item["type"].(string); itemType == "userMessage" {
+				redactTextFields(item)
+			}
+		}
+	}
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		return raw
+	}
+	return encoded
+}
+
+func redactUserMessageValues(value any) {
+	switch typed := value.(type) {
+	case map[string]any:
+		if itemType, _ := typed["type"].(string); itemType == "userMessage" {
+			redactTextFields(typed)
+			return
+		}
+		for _, child := range typed {
+			redactUserMessageValues(child)
+		}
+	case []any:
+		for _, child := range typed {
+			redactUserMessageValues(child)
+		}
+	}
+}
+
+// redactGoalObjective preserves protocol shape while ensuring a thread goal
+// cannot enter the local debug evidence. It intentionally redacts every JSON
+// field named objective: a harmless false positive is safer than a persisted
+// user objective.
+func redactGoalObjective(raw []byte) []byte {
+	var value any
+	if json.Unmarshal(raw, &value) != nil {
+		return raw
+	}
+	redactObjectiveValue(value)
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		return raw
+	}
+	return encoded
+}
+
+func redactObjectiveValue(value any) {
+	switch typed := value.(type) {
+	case map[string]any:
+		for key, child := range typed {
+			if key == "objective" {
+				typed[key] = redactedText(child)
+				continue
+			}
+			redactObjectiveValue(child)
+		}
+	case []any:
+		for _, child := range typed {
+			redactObjectiveValue(child)
+		}
+	}
+}
+
+func redactTextFields(value any) {
+	switch typed := value.(type) {
+	case map[string]any:
+		for key, child := range typed {
+			if key == "text" {
+				typed[key] = redactedText(child)
+				continue
+			}
+			redactTextFields(child)
+		}
+	case []any:
+		for _, child := range typed {
+			redactTextFields(child)
+		}
+	}
+}
+
+func redactedText(value any) string {
+	text, ok := value.(string)
+	if !ok {
+		return "[redacted]"
+	}
+	digest := sha256.Sum256([]byte(text))
+	return fmt.Sprintf("[redacted sha256=%x bytes=%d]", digest, len([]byte(text)))
 }
 
 func (t *Timeline) ProtocolError(seq uint64, err error) error {

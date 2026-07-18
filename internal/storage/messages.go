@@ -50,6 +50,8 @@ type MessageRecord struct {
 	ChatGroupID string
 }
 
+const persistIncomingMessageSQL = `INSERT INTO messages (id,trace_id,chat_group_id,feishu_event_id,feishu_user_message_id,sender_open_id,user_content,received_at,command_kind,command_payload_sha256,command_payload_bytes,command_effect_state,command_reply_outcome,status) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,'received')`
+
 type CompanionDeliverySummary struct {
 	BatchID, FirstMessageID, Content, ErrorCode string
 	DurationMS                                  int64
@@ -146,7 +148,7 @@ func (s *Store) PersistIncoming(ctx context.Context, appID, chatType, chatID str
 	if input.CommandKind != "" {
 		commandEffect, commandReply = "pending", "pending"
 	}
-	_, err = tx.ExecContext(ctx, `INSERT INTO messages (id,trace_id,chat_group_id,feishu_event_id,feishu_user_message_id,sender_open_id,user_content,received_at,command_kind,command_payload_sha256,command_payload_bytes,command_effect_state,command_reply_outcome,status) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,'received')`, input.ID, input.TraceID, input.ChatGroupID, input.FeishuEventID, input.FeishuUserMessageID, input.SenderOpenID, input.UserContent, input.ReceivedAt.UTC(), commandKind, commandDigest, commandBytes, commandEffect, commandReply)
+	_, err = tx.ExecContext(ctx, persistIncomingMessageSQL, input.ID, input.TraceID, input.ChatGroupID, input.FeishuEventID, input.FeishuUserMessageID, input.SenderOpenID, input.UserContent, input.ReceivedAt.UTC(), commandKind, commandDigest, commandBytes, commandEffect, commandReply)
 	if err != nil {
 		var e *mysql.MySQLError
 		if errors.As(err, &e) && e.Number == 1062 {
@@ -181,17 +183,31 @@ func (s *Store) CreateMessage(ctx context.Context, input MessageInput) (MessageR
 }
 
 func (s *Store) CompleteMessage(ctx context.Context, id, botMessageID, content string, durationMS int64) error {
-	const query = `UPDATE messages SET status = 'succeeded', feishu_bot_message_id = ?, assistant_content = ?, duration_ms = ?, completed_at = CURRENT_TIMESTAMP(3) WHERE id = ?`
-	if _, err := s.DB.ExecContext(ctx, query, botMessageID, content, durationMS, id); err != nil {
+	const query = `UPDATE messages SET status = 'succeeded', feishu_bot_message_id = ?, assistant_content = ?, duration_ms = ?, completed_at = CURRENT_TIMESTAMP(3), command_effect_state=CASE WHEN command_kind IS NULL THEN command_effect_state ELSE 'succeeded' END, command_reply_outcome=CASE WHEN command_kind IS NULL THEN command_reply_outcome WHEN ? = '' THEN 'rejected' ELSE 'sent' END WHERE id = ?`
+	if _, err := s.DB.ExecContext(ctx, query, botMessageID, content, durationMS, botMessageID, id); err != nil {
 		return fmt.Errorf("complete message: %w", err)
 	}
 	return nil
 }
 
 func (s *Store) FailMessage(ctx context.Context, id, errorCode, safeError string, durationMS int64) error {
-	const query = `UPDATE messages SET status = 'failed', error_code = ?, assistant_content = ?, duration_ms = ?, completed_at = CURRENT_TIMESTAMP(3) WHERE id = ?`
-	if _, err := s.DB.ExecContext(ctx, query, errorCode, safeError, durationMS, id); err != nil {
+	const query = `UPDATE messages SET status = 'failed', error_code = ?, assistant_content = ?, duration_ms = ?, completed_at = CURRENT_TIMESTAMP(3), command_effect_state=CASE WHEN command_kind IS NULL THEN command_effect_state WHEN ? IN ('command_reply_unknown','command_reply_rejected') THEN 'succeeded' ELSE 'failed' END, command_reply_outcome=CASE WHEN command_kind IS NULL THEN command_reply_outcome WHEN ? = 'command_reply_unknown' THEN 'unknown' WHEN ? = 'command_reply_rejected' THEN 'rejected' ELSE 'sent' END WHERE id = ?`
+	if _, err := s.DB.ExecContext(ctx, query, errorCode, safeError, durationMS, errorCode, errorCode, errorCode, id); err != nil {
 		return fmt.Errorf("fail message: %w", err)
+	}
+	return nil
+}
+
+// RecordCommandReplyFailure keeps a command effect separate from a failed or
+// indeterminate confirmation delivery.
+func (s *Store) RecordCommandReplyFailure(ctx context.Context, id, effect, outcome, safeError string) error {
+	if effect != "succeeded" && effect != "failed" || outcome != "unknown" && outcome != "rejected" {
+		return fmt.Errorf("invalid command reply outcome")
+	}
+	code := "command_reply_" + outcome
+	_, err := s.DB.ExecContext(ctx, `UPDATE messages SET status='failed', error_code=?, assistant_content=?, completed_at=CURRENT_TIMESTAMP(3), command_effect_state=?, command_reply_outcome=? WHERE id=? AND command_kind IS NOT NULL`, code, safeError, effect, outcome, id)
+	if err != nil {
+		return fmt.Errorf("record command reply failure: %w", err)
 	}
 	return nil
 }
@@ -400,4 +416,12 @@ func (l BatchLifecycle) CompleteCompanionDelivery(ctx context.Context, ids []str
 }
 func (l BatchLifecycle) FailCompanionDelivery(ctx context.Context, ids []string, batchID, code, safeContent string, durationMS int64) error {
 	return l.Store.FailCompanionDelivery(ctx, ids, batchID, code, safeContent, durationMS)
+}
+
+func (l BatchLifecycle) MarkScheduledRunning(ctx context.Context, runID, claimToken string) error {
+	return l.Store.MarkScheduledRunning(ctx, runID, claimToken)
+}
+
+func (l BatchLifecycle) CompleteScheduledRun(ctx context.Context, runID, claimToken string, succeeded bool, code string, durationMS int64) error {
+	return l.Store.CompleteScheduledRun(ctx, runID, claimToken, succeeded, code, durationMS)
 }

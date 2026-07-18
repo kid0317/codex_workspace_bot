@@ -49,18 +49,30 @@ type Observer interface {
 }
 type Dispatcher func(Event) (string, error)
 type ServerRequestHandler func(Event) (any, error)
+type ServerResponseObserver func(Event, error)
 
 type Client struct {
-	conn      io.ReadWriteCloser
-	writeMu   sync.Mutex
-	mu        sync.Mutex
-	pending   map[string]chan response
-	nextID    atomic.Uint64
-	done      chan struct{}
-	closeOnce sync.Once
-	observer  Observer
-	dispatch  Dispatcher
-	server    ServerRequestHandler
+	conn           io.ReadWriteCloser
+	writeMu        sync.Mutex
+	mu             sync.Mutex
+	pending        map[string]chan response
+	nextID         atomic.Uint64
+	eventSeq       atomic.Uint64
+	done           chan struct{}
+	closeOnce      sync.Once
+	observer       Observer
+	dispatch       Dispatcher
+	server         ServerRequestHandler
+	serverResponse ServerResponseObserver
+}
+
+// SetServerResponseObserver observes the terminal JSON-RPC write for server
+// requests. It is intentionally separate from the handler: a successful tool
+// handler is not a successful protocol response until stdout accepts it.
+func (c *Client) SetServerResponseObserver(observer ServerResponseObserver) {
+	c.mu.Lock()
+	c.serverResponse = observer
+	c.mu.Unlock()
 }
 
 func NewClient(conn io.ReadWriteCloser, observer Observer, dispatch Dispatcher, server ...ServerRequestHandler) *Client {
@@ -154,13 +166,15 @@ func (c *Client) readLoop() {
 }
 
 func (c *Client) handle(raw []byte) {
-	var seq uint64
+	seq := c.eventSeq.Add(1)
 	if c.observer != nil {
-		var err error
-		seq, err = c.observer.RecordRaw(raw)
+		observedSeq, err := c.observer.RecordRaw(raw)
 		if err != nil {
 			c.Close()
 			return
+		}
+		if observedSeq != 0 {
+			seq = observedSeq
 		}
 	}
 	var probe struct {
@@ -218,7 +232,8 @@ func (c *Client) dispatchEvent(event Event, result json.RawMessage, rpcErr *rpcE
 	}
 	if event.Class == "server_request" {
 		if c.server == nil {
-			_ = c.write(response{JSONRPC: "2.0", ID: event.ID, Error: &rpcError{Code: -32001, Message: "unsupported server request"}})
+			err := c.write(response{JSONRPC: "2.0", ID: event.ID, Error: &rpcError{Code: -32001, Message: "unsupported server request"}})
+			c.notifyServerResponse(event, err)
 		} else {
 			go c.respondServerRequest(event)
 		}
@@ -232,11 +247,22 @@ func (c *Client) dispatchEvent(event Event, result json.RawMessage, rpcErr *rpcE
 
 func (c *Client) respondServerRequest(event Event) {
 	result, err := c.server(event)
+	var writeErr error
 	if err != nil {
-		_ = c.write(response{JSONRPC: "2.0", ID: event.ID, Error: &rpcError{Code: -32000, Message: "server request failed"}})
-		return
+		writeErr = c.write(response{JSONRPC: "2.0", ID: event.ID, Error: &rpcError{Code: -32000, Message: "server request failed"}})
+	} else {
+		writeErr = c.write(response{JSONRPC: "2.0", ID: event.ID, Result: mustJSON(result)})
 	}
-	_ = c.write(response{JSONRPC: "2.0", ID: event.ID, Result: mustJSON(result)})
+	c.notifyServerResponse(event, writeErr)
+}
+
+func (c *Client) notifyServerResponse(event Event, writeErr error) {
+	c.mu.Lock()
+	observer := c.serverResponse
+	c.mu.Unlock()
+	if observer != nil {
+		observer(event, writeErr)
+	}
 }
 
 func ReadRequest(reader io.Reader) (Request, error) {

@@ -18,6 +18,7 @@ func main() {
 		usage()
 	}
 	cmd := os.Args[1]
+	args := os.Args[2:]
 	fs := flag.NewFlagSet(cmd, flag.ExitOnError)
 	configPath := fs.String("config", "config.yaml", "server config")
 	name := fs.String("name", "", "app name")
@@ -28,7 +29,7 @@ func main() {
 	workspace := fs.String("workspace-dir", "", "absolute workspace directory")
 	model := fs.String("model", "gpt-5.6-terra", "model")
 	effort := fs.String("effort", "medium", "reasoning effort")
-	_ = fs.Parse(os.Args[2:])
+	_ = fs.Parse(args)
 	cfg, err := config.Load(*configPath)
 	if err != nil {
 		fail(err)
@@ -95,7 +96,7 @@ func main() {
 	}
 }
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: appctl import-legacy-app|list|enable|disable|delete --config config.yaml [--name NAME]")
+	fmt.Fprintln(os.Stderr, "usage: appctl create|update|import-legacy-app|list|enable|disable|delete --config config.yaml [--name NAME]")
 	os.Exit(2)
 }
 func fail(err error) { fmt.Fprintln(os.Stderr, "appctl:", err); os.Exit(1) }

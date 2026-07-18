@@ -150,11 +150,13 @@ func TestReadMarkdownFileAllowsAnyLocalRegularPathAndRejectsInvalidUTF8(t *testi
 
 type fakeClient struct {
 	target  worker.ReplyTarget
+	owner   string
 	text    string
 	files   int
 	docs    int
 	docID   string
 	docText string
+	docOutcome worker.DocumentOutcome
 	textErr error
 	calls   int
 }
@@ -171,12 +173,16 @@ func (f *fakeClient) UploadAndSend(_ context.Context, target worker.ReplyTarget,
 	f.target, f.files = target, f.files+1
 	return "file-key", "om-file", nil
 }
-func (f *fakeClient) CreateDocumentAndAnnounce(_ context.Context, target worker.ReplyTarget, _ string, markdown []byte) (worker.DocumentOutcome, error) {
+func (f *fakeClient) CreateDocumentAndAnnounce(_ context.Context, target worker.ReplyTarget, ownerOpenID, _ string, markdown []byte) (worker.DocumentOutcome, error) {
 	f.target, f.docs = target, f.docs+1
+	f.owner = ownerOpenID
 	if len(markdown) == 0 {
 		return worker.DocumentOutcome{}, errors.New("missing markdown")
 	}
-	return worker.DocumentOutcome{URL: "https://example.test/docx/doc-1", ContentWritten: true, AnnouncementOutcome: "sent"}, nil
+	if f.docOutcome.URL != "" {
+		return f.docOutcome, nil
+	}
+	return worker.DocumentOutcome{URL: "https://example.test/docx/doc-1", ContentWritten: true, AnnouncementOutcome: "sent", OwnerTransferred: true, OwnerTransferOutcome: "transferred"}, nil
 }
 
 func (f *fakeClient) ReadDocument(_ context.Context, documentID string) (string, error) {
@@ -218,8 +224,8 @@ func TestServiceCreatesDocumentFromAnyLocalMarkdownAndAnnouncesIt(t *testing.T) 
 	client := &fakeClient{}
 	service := Service{Clients: map[string]Client{"app-1": client}, MaxMarkdownBytes: 1_000}
 	arguments, _ := json.Marshal(map[string]string{"markdown_ref": markdownPath, "title": "Result"})
-	result, err := service.Execute(context.Background(), Route{AppID: "app-1", Reply: worker.ReplyTarget{ID: "oc-current", Type: "chat_id"}}, codexapp.ToolCall{Tool: "feishu.doc_create_and_announce", Arguments: arguments})
-	if err != nil || !result.Success || client.docs != 1 || client.target.ID != "oc-current" || len(result.ContentItems) != 1 || !strings.Contains(result.ContentItems[0].Text, `"content_written":true`) || !strings.Contains(result.ContentItems[0].Text, `"announcement_outcome":"sent"`) {
+	result, err := service.Execute(context.Background(), Route{AppID: "app-1", OwnerOpenID: "ou-sender", Reply: worker.ReplyTarget{ID: "oc-current", Type: "chat_id"}}, codexapp.ToolCall{Tool: "feishu.doc_create_and_announce", Arguments: arguments})
+	if err != nil || !result.Success || client.docs != 1 || client.target.ID != "oc-current" || client.owner != "ou-sender" || len(result.ContentItems) != 1 || !strings.Contains(result.ContentItems[0].Text, `"content_written":true`) || !strings.Contains(result.ContentItems[0].Text, `"announcement_outcome":"sent"`) || !strings.Contains(result.ContentItems[0].Text, `"owner_transferred":true`) || !strings.Contains(result.ContentItems[0].Text, `"owner_transfer_outcome":"transferred"`) {
 		t.Fatalf("result=%#v err=%v client=%#v", result, err, client)
 	}
 }
@@ -232,7 +238,7 @@ func TestServiceCreatesDocumentFromWorkspaceRelativeMarkdownRef(t *testing.T) {
 	client := &fakeClient{}
 	service := Service{Clients: map[string]Client{"app-1": client}, MaxMarkdownBytes: 1_000}
 	arguments, _ := json.Marshal(map[string]string{"markdown_ref": "result.md", "title": "Result"})
-	result, err := service.Execute(context.Background(), Route{AppID: "app-1", WorkspaceDir: workspace, Reply: worker.ReplyTarget{ID: "oc-current", Type: "chat_id"}}, codexapp.ToolCall{Tool: "feishu.doc_create_and_announce", Arguments: arguments})
+	result, err := service.Execute(context.Background(), Route{AppID: "app-1", OwnerOpenID: "ou-sender", WorkspaceDir: workspace, Reply: worker.ReplyTarget{ID: "oc-current", Type: "chat_id"}}, codexapp.ToolCall{Tool: "feishu.doc_create_and_announce", Arguments: arguments})
 	if err != nil || !result.Success || client.docs != 1 {
 		t.Fatalf("result=%#v err=%v docs=%d", result, err, client.docs)
 	}
@@ -247,7 +253,7 @@ func TestServiceAcceptsUnqualifiedDynamicDocumentToolName(t *testing.T) {
 	client := &fakeClient{}
 	service := Service{Clients: map[string]Client{"app-1": client}, MaxMarkdownBytes: 1_000}
 	arguments, _ := json.Marshal(map[string]string{"markdown_ref": markdownPath, "title": "Result"})
-	result, err := service.Execute(context.Background(), Route{AppID: "app-1", Reply: worker.ReplyTarget{ID: "oc-current", Type: "chat_id"}}, codexapp.ToolCall{Tool: "doc_create_and_announce", Arguments: arguments})
+	result, err := service.Execute(context.Background(), Route{AppID: "app-1", OwnerOpenID: "ou-sender", Reply: worker.ReplyTarget{ID: "oc-current", Type: "chat_id"}}, codexapp.ToolCall{Tool: "doc_create_and_announce", Arguments: arguments})
 	if err != nil || !result.Success || client.docs != 1 {
 		t.Fatalf("result=%#v err=%v docs=%d", result, err, client.docs)
 	}
@@ -284,6 +290,51 @@ func TestServiceRejectsDocumentWithEmptyTitleBeforeCallingFeishu(t *testing.T) {
 	arguments, _ := json.Marshal(map[string]string{"markdown_ref": markdownPath, "title": ""})
 	result, err := service.Execute(context.Background(), Route{AppID: "app-1", Reply: worker.ReplyTarget{ID: "oc-current", Type: "chat_id"}}, codexapp.ToolCall{Tool: "feishu.doc_create_and_announce", Arguments: arguments})
 	if err != nil || result.Success || client.docs != 0 {
+		t.Fatalf("result=%#v err=%v docs=%d", result, err, client.docs)
+	}
+}
+
+func TestServiceRejectsDocumentWithoutTrustedOwnerBeforeCallingFeishu(t *testing.T) {
+	dir := t.TempDir()
+	markdownPath := filepath.Join(dir, "result.md")
+	if err := os.WriteFile(markdownPath, []byte("# Result\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	client := &fakeClient{}
+	service := Service{Clients: map[string]Client{"app-1": client}, MaxMarkdownBytes: 1_000}
+	arguments, _ := json.Marshal(map[string]string{"markdown_ref": markdownPath, "title": "Result"})
+	result, err := service.Execute(context.Background(), Route{AppID: "app-1", Reply: worker.ReplyTarget{ID: "oc-group", Type: "chat_id"}}, codexapp.ToolCall{Tool: "feishu.doc_create_and_announce", Arguments: arguments})
+	if err != nil || result.Success || client.docs != 0 || client.owner != "" {
+		t.Fatalf("result=%#v err=%v docs=%d owner=%q", result, err, client.docs, client.owner)
+	}
+}
+
+func TestServiceDocumentOwnerUsesSenderNotGroupReplyTarget(t *testing.T) {
+	dir := t.TempDir()
+	markdownPath := filepath.Join(dir, "result.md")
+	if err := os.WriteFile(markdownPath, []byte("# Result\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	client := &fakeClient{}
+	service := Service{Clients: map[string]Client{"app-1": client}, MaxMarkdownBytes: 1_000}
+	arguments, _ := json.Marshal(map[string]string{"markdown_ref": markdownPath, "title": "Result"})
+	result, err := service.Execute(context.Background(), Route{AppID: "app-1", OwnerOpenID: "ou-sender", Reply: worker.ReplyTarget{ID: "oc-group", Type: "chat_id"}}, codexapp.ToolCall{Tool: "feishu.doc_create_and_announce", Arguments: arguments})
+	if err != nil || !result.Success || client.docs != 1 || client.owner != "ou-sender" || client.owner == client.target.ID {
+		t.Fatalf("result=%#v err=%v target=%#v owner=%q", result, err, client.target, client.owner)
+	}
+}
+
+func TestServiceAnnouncesDocumentWhenOwnerTransferIsRejected(t *testing.T) {
+	dir := t.TempDir()
+	markdownPath := filepath.Join(dir, "result.md")
+	if err := os.WriteFile(markdownPath, []byte("# Result\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	client := &fakeClient{docOutcome: worker.DocumentOutcome{URL: "https://example.test/docx/doc-1", ContentWritten: true, AnnouncementOutcome: "sent", OwnerTransferred: false, OwnerTransferOutcome: "rejected"}}
+	service := Service{Clients: map[string]Client{"app-1": client}, MaxMarkdownBytes: 1_000}
+	arguments, _ := json.Marshal(map[string]string{"markdown_ref": markdownPath, "title": "Result"})
+	result, err := service.Execute(context.Background(), Route{AppID: "app-1", OwnerOpenID: "ou-sender", Reply: worker.ReplyTarget{ID: "oc-group", Type: "chat_id"}}, codexapp.ToolCall{Tool: "feishu.doc_create_and_announce", Arguments: arguments})
+	if err != nil || !result.Success || client.docs != 1 || !strings.Contains(result.ContentItems[0].Text, `"owner_transferred":false`) || !strings.Contains(result.ContentItems[0].Text, `"owner_transfer_outcome":"rejected"`) {
 		t.Fatalf("result=%#v err=%v docs=%d", result, err, client.docs)
 	}
 }

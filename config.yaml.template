@@ -43,3 +43,42 @@ feishu_actions:
   result_keys:
     - version: 1
       key_env: "CODEX_WORKSPACE_BOT_ACTION_RESULT_KEY_V1"
+schedule:
+  # Enable only after both key variables and the S06 migration are present.
+  enabled: false
+  tick_interval_ms: 1000
+  misfire_grace_seconds: 60
+  max_enabled_tasks_per_owner: 100
+  max_enabled_tasks_per_app: 1000
+  max_prompt_dispatch_per_tick: 20
+  payload_keys:
+    - version: 1
+      key_env: "CODEX_WORKSPACE_BOT_SCHEDULE_PAYLOAD_KEY_V1"
+  owner_hmac_keys:
+    - version: 1
+      key_env: "CODEX_WORKSPACE_BOT_SCHEDULE_OWNER_HMAC_KEY_V1"
+scripts:
+  # Script commands run as this bot process user on this local machine.
+  enabled: false
+  shell_path: "/bin/sh"
+  timeout_seconds: 300
+  max_output_bytes: 24576
+  max_concurrent: 2
+observability:
+  langfuse:
+    # Enabled exporter writes business payloads/IDs as plaintext to the
+    # personal self-hosted project; only runtime credentials are stripped.
+    enabled: false
+    base_url: "https://langfuse.example.local"
+    # Or use base_url_env to keep the complete endpoint out of this file.
+    base_url_env: ""
+    public_key_env: "LANGFUSE_PUBLIC_KEY"
+    secret_key_env: "LANGFUSE_SECRET_KEY"
+    project_id: ""
+    # Real export is gated until a human selected the NEW self-hosted Project,
+    # copied this nonce from its read-back note, and set this true.
+    project_binding_nonce: ""
+    project_binding_verified: false
+    environment: "development"
+    export_timeout_seconds: 2
+    max_queue_size: 4096

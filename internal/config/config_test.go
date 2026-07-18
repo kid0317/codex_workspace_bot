@@ -35,6 +35,58 @@ database:
 	}
 }
 
+func TestLoadReadsOptionalLangfuseCredentialsWithoutMakingIngressConfigFatal(t *testing.T) {
+	t.Setenv("TEST_DB_PASSWORD", "test-password")
+	t.Setenv("TEST_LANGFUSE_PUBLIC", "pk-test")
+	t.Setenv("TEST_LANGFUSE_SECRET", "sk-test")
+	path := writeConfig(t, `
+database:
+  host: 127.0.0.1
+  name: codex_workspace_bot
+  user: codex_workspace_bot
+  password_env: TEST_DB_PASSWORD
+observability:
+  langfuse:
+    enabled: true
+    base_url: https://langfuse.local
+    public_key_env: TEST_LANGFUSE_PUBLIC
+    secret_key_env: TEST_LANGFUSE_SECRET
+`)
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if !cfg.Observability.Langfuse.Enabled || cfg.Observability.Langfuse.PublicKey != "pk-test" || cfg.Observability.Langfuse.SecretKey != "sk-test" {
+		t.Fatalf("langfuse config = %#v", cfg.Observability.Langfuse)
+	}
+	if cfg.Observability.Langfuse.ExportTimeoutSeconds != 2 || cfg.Observability.Langfuse.MaxQueueSize != 4096 {
+		t.Fatalf("langfuse defaults = %#v", cfg.Observability.Langfuse)
+	}
+}
+
+func TestLoadAllowsLangfuseBaseURLFromEnvironment(t *testing.T) {
+	t.Setenv("TEST_DB_PASSWORD", "test-password")
+	t.Setenv("TEST_LANGFUSE_BASE_URL", "https://langfuse.local")
+	path := writeConfig(t, `
+database:
+  host: 127.0.0.1
+  name: codex_workspace_bot
+  user: codex_workspace_bot
+  password_env: TEST_DB_PASSWORD
+observability:
+  langfuse:
+    enabled: true
+    base_url_env: TEST_LANGFUSE_BASE_URL
+`)
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.Observability.Langfuse.BaseURL != "https://langfuse.local" {
+		t.Fatalf("base URL = %q", cfg.Observability.Langfuse.BaseURL)
+	}
+}
+
 func TestLoadRejectsMissingDatabasePassword(t *testing.T) {
 	_ = os.Unsetenv("MISSING_DB_PASSWORD")
 	path := writeConfig(t, `
@@ -209,6 +261,108 @@ feishu_actions:
 				t.Fatal("Load() accepted unsafe S05 configuration")
 			}
 		})
+	}
+}
+
+func TestLoadRejectsEnabledScheduleWithoutIndependentKeyrings(t *testing.T) {
+	t.Setenv("TEST_DB_PASSWORD", "password")
+	path := writeConfig(t, `
+database:
+  host: localhost
+  name: bot
+  user: bot
+  password_env: TEST_DB_PASSWORD
+schedule:
+  enabled: true
+`)
+	if _, err := config.Load(path); err == nil {
+		t.Fatal("Load() accepted enabled schedule without keyrings")
+	}
+}
+
+func TestLoadAppliesAndValidatesScheduleConfiguration(t *testing.T) {
+	t.Setenv("TEST_DB_PASSWORD", "password")
+	payloadKey := base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{3}, 32))
+	ownerKey := base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{4}, 32))
+	t.Setenv("TEST_S06_PAYLOAD_KEY", payloadKey)
+	t.Setenv("TEST_S06_OWNER_KEY", ownerKey)
+
+	path := writeConfig(t, `
+database:
+  host: localhost
+  name: bot
+  user: bot
+  password_env: TEST_DB_PASSWORD
+schedule:
+  enabled: true
+  payload_keys: [{version: 2, key_env: TEST_S06_PAYLOAD_KEY}]
+  owner_hmac_keys: [{version: 3, key_env: TEST_S06_OWNER_KEY}]
+`)
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if !cfg.Schedule.Enabled || cfg.Schedule.TickIntervalMS != 1000 || cfg.Schedule.MisfireGraceSeconds != 60 || cfg.Schedule.MaxEnabledTasksPerOwner != 100 || cfg.Schedule.MaxEnabledTasksPerApp != 1000 || cfg.Schedule.MaxPromptDispatchPerTick != 20 {
+		t.Fatalf("schedule defaults = %#v", cfg.Schedule)
+	}
+	if len(cfg.Schedule.PayloadKeys) != 1 || !bytes.Equal(cfg.Schedule.PayloadKeys[0].Key, bytes.Repeat([]byte{3}, 32)) {
+		t.Fatalf("payload keyring = %#v", cfg.Schedule.PayloadKeys)
+	}
+	if len(cfg.Schedule.OwnerHMACKeys) != 1 || !bytes.Equal(cfg.Schedule.OwnerHMACKeys[0].Key, bytes.Repeat([]byte{4}, 32)) {
+		t.Fatalf("owner keyring = %#v", cfg.Schedule.OwnerHMACKeys)
+	}
+}
+
+func TestLoadRejectsInvalidEnabledScriptLimits(t *testing.T) {
+	t.Setenv("TEST_DB_PASSWORD", "password")
+	payloadKey := base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{3}, 32))
+	ownerKey := base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{4}, 32))
+	t.Setenv("TEST_S06_PAYLOAD_KEY", payloadKey)
+	t.Setenv("TEST_S06_OWNER_KEY", ownerKey)
+	path := writeConfig(t, `
+database:
+  host: localhost
+  name: bot
+  user: bot
+  password_env: TEST_DB_PASSWORD
+schedule:
+  enabled: true
+  payload_keys: [{version: 1, key_env: TEST_S06_PAYLOAD_KEY}]
+  owner_hmac_keys: [{version: 1, key_env: TEST_S06_OWNER_KEY}]
+scripts:
+  enabled: true
+  timeout_seconds: 1801
+`)
+	if _, err := config.Load(path); err == nil {
+		t.Fatal("Load() accepted invalid script limits")
+	}
+}
+
+func TestValidateScriptCapabilityDoesNotRequireRunnerOrNetworkIsolation(t *testing.T) {
+	t.Setenv("TEST_DB_PASSWORD", "password")
+	payloadKey := base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{3}, 32))
+	ownerKey := base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{4}, 32))
+	t.Setenv("TEST_S06_PAYLOAD_KEY", payloadKey)
+	t.Setenv("TEST_S06_OWNER_KEY", ownerKey)
+	_, err := config.Load(writeConfig(t, `
+database:
+  host: localhost
+  name: bot
+  user: bot
+  password_env: TEST_DB_PASSWORD
+schedule:
+  enabled: true
+  payload_keys: [{version: 1, key_env: TEST_S06_PAYLOAD_KEY}]
+  owner_hmac_keys: [{version: 1, key_env: TEST_S06_OWNER_KEY}]
+scripts:
+  enabled: true
+  shell_path: "/bin/sh"
+  timeout_seconds: 300
+  max_output_bytes: 24576
+  max_concurrent: 2
+`))
+	if err != nil {
+		t.Fatalf("Load() error=%v", err)
 	}
 }
 

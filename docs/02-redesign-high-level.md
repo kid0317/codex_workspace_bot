@@ -1,7 +1,7 @@
-# Codex Workspace Bot 概要设计 v4.3
+# Codex Workspace Bot 概要设计 v4.6
 
-> **版本**: v4.3 | **日期**: 2026-07-12
-> **定位**: 企业级飞书 AI 助理平台 — Codex 原生版本
+> **版本**: v4.6 | **日期**: 2026-07-14
+> **定位**: 个人本机飞书 AI 工作区编排器 — Codex 原生版本
 > **技术栈**: Go 1.23 + Codex App Server + MySQL + 飞书 SDK + Langfuse
 
 ---
@@ -55,6 +55,9 @@
 apps（飞书应用与运行策略）
   1 └── N chat_groups（一个 App 下的单聊或群聊，一个当前 Codex Thread）
               1 └── N messages（一次用户请求及其最终结果，即一轮）
+              1 └── N scheduled_tasks（S06：绑定 owner 的 Cron 定义）
+                          1 └── N scheduled_task_runs（每个已领取的时间 slot）
+                                      1 └── N scheduled_task_deliveries（每次自动卡片或 fallback 交付）
 
 Worker / 队列 = 纯内存调度实体，不持久化。
 ```
@@ -65,19 +68,19 @@ Worker / 队列 = 纯内存调度实体，不持久化。
 
 `chat_groups` 是概设中的 Channel：其唯一身份是 `(app_id, chat_type, chat_id)`，因此同一飞书群中不同 App 的 Bot 会拥有不同 ChatGroup 和不同 Codex Thread。`chat_id` 始终保存事件的 `message.chat_id`；单聊发送目标另存为消息发送者 `open_id`，群聊发送目标为 `chat_id`。一期直接忽略 `topic_group`。
 
-`chat_groups.codex_thread_id` 是当前可续接的 App Server Thread；`/new` 将它清空，下一条普通消息懒创建新 Thread。没有单独 Session 表。
+`chat_groups.codex_thread_id` 是当前可续接的 App Server Thread；`/new` 将它清空，下一条普通消息懒创建新 Thread。没有单独 Session 表。S06 增加持久 `codex_tool_catalog_version`、`catalog_upgrade_state`、`catalog_upgrade_from_thread_id` 与 `catalog_upgrade_target`：旧 catalog 只能在空闲边界经 `archive_pending → start_pending → stable` 的持久状态机升级，崩溃恢复不会 resume 旧 Thread；`schedule_enabled` 是频道 route 的持久撤销开关。
 
 `messages` 一行是一轮，保存用户内容、最终结果、飞书 event/user/bot message ID、发送者 open_id、状态、耗时与 Langfuse 兼容 Trace ID。`trace_id` 为 32 位小写十六进制：以 `app_id + feishu_event_id` 为 seed 计算 SHA-256 并截取前 16 bytes；这既满足 W3C/Langfuse Trace ID 格式，也使同一飞书重投保持同一关联 ID。
 
 ### 2.3 Worker、队列与命令
 
-Worker 的持久化归属仍是 ChatGroup，但内存调度 key 必须与飞书回复身份一致：group 为 `group:{chat_id}:{app_id}`，p2p 为 `p2p:{sender_open_id}:{app_id}`。每个 Worker 拥有一个内存 FIFO；普通用户消息只做最小验证和持久化后入队，Worker 每次读取当前已积累的普通消息并合并为一次 Agent 处理，保持同一调度 key 的上下文严格串行。不同 key 可并行。单聊的 `chat_id` 继续只用于 ChatGroup 持久化，不能替代 p2p Worker key 或回复目标。
+Worker 的持久化归属仍是 ChatGroup，但内存调度 key 必须与飞书回复身份一致：group 为 `group:{chat_id}:{app_id}`，p2p 为 `p2p:{sender_open_id}:{app_id}`。每个 Worker 拥有一个内存 FIFO；普通用户消息只做最小验证和持久化后入队，Worker 每次读取当前已积累的普通消息并合并为一次 Agent 处理，保持同一调度 key 的上下文严格串行。不同 key 可并行。单聊的 `chat_id` 继续只用于 ChatGroup 持久化，不能替代 p2p Worker key 或回复目标。S06 增加 memory-only、redacted `ActorPrincipal`：普通 Batch 只能合并连续同 actor 输入；Actor 切换和 scheduled Prompt 均为 Batch 边界，以便 `schedule` tool 永远从 exact attempt owner 推导而非猜测群成员。
 
 Router 在持久化 receipt 并完成 event-id 去重后分类命令。支持的产品命令是 `/new`、`/cancel`、`/status`、`/goal <目标>`、`/help`；`/stop` 只是 `/cancel` 的兼容别名。未知 slash 命令和错误参数持久化为命令 receipt 并返回固定错误，绝不进入普通 Turn。
 
-`/new` 与 `/cancel` 经 Worker-owned control API 线性化：它在同一频道的 mutex 下建立 barrier、分离等待 FIFO、条件失败被移除的 receipt、取消 active turn/companion delivery，并在权威终态后发送命令结果。`/new` 还会先 archive 当前 Thread、再 CAS 清空持久化 thread pointer；下一条普通文本才懒创建 Thread。`/goal` 是同一 Worker 中的独占工作项，只能 resume 既有 Thread 后调用 `thread/goal/set`，不创建 Thread 或普通 Turn。`/status` 是 receipt-first 的只读例外：它直接并发读取账户 rate limit 与 usage，不进入 Worker，因而可先于同频道 control reply 完成。所有命令结果和 effect 分开持久化，未知发送绝不重试可见消息。
+`/new` 与 `/cancel` 经 Worker-owned control API 线性化：它在同一频道的 mutex 下建立 barrier、分离等待 FIFO、条件失败被移除的 receipt、取消 active turn/companion delivery，并在权威终态后发送命令结果。`/new` 还会先 archive 当前 Thread、再 CAS 清空持久化 thread pointer；下一条普通文本才懒创建 Thread。`/goal <目标>` 是同一 Worker 中的独占 GoalRun：交付可见性准备完成后，预注册 thread 级 Goal owner/redaction registry，目标文本写入 `thread/goal/set(active)`，并作为首个 `turn/start.input`，所以会立即启动；无/失效 Thread 走安全 start/resume-fallback 并 CAS 持久化。GoalRun 持有频道直到 `thread/goal/updated` 的权威终态，连续 continuation Turn 的新 turn ID 继续路由到同一 generation 输出与控制所有者；首个 `turn/completed` 不代表完成。已完成 Turn 后处于 awaiting-continuation 时，新 turn ID 可以由 `turn/started` 或首条明确 item/Turn 事件绑定，避免 App Server 的 item-first continuation 丢失可见输出。Goal 卡先显示固定“已受理/正在启动”状态；终态若无 allowlisted commentary 则显示明确生命周期状态，而不遗留“等待 Codex 进展”。awaiting continuation 在既有 Runtime idle timeout 内无新 Turn/terminal 时暂停 Goal，以 `goal_continuation_suppressed` 收尾，不伪造循环。`/cancel`/`/stop` 先建 stopping fence 并确认暂停，再中断/Drain Turn；pause/get unknown 时保留 owner、registry 与频道 fail-closed，直到 paused/terminal 确认或 App Server generation exit，`/new` 仅在此后 archive。`/status` 是 receipt-first 的只读例外：它直接并发读取账户 rate limit 与 usage，不进入 Worker，因而可先于同频道 control reply 完成。所有命令结果和 effect 分开持久化，未知发送绝不重试可见消息。
 
-普通文本在 Router receipt 时捕获 UTC 时间，写入 `messages.received_at`；Worker 以固定 `Asia/Shanghai` 将每条文本格式化为 `<now timezone="Asia/Shanghai">RFC3339</now>` 加原始正文。命令和 goal 不使用该 formatter。
+普通文本在 Router receipt 时捕获 UTC 时间，写入 `messages.received_at`；Worker 以固定 `Asia/Shanghai` 将每条文本格式化为 `<now timezone="Asia/Shanghai">RFC3339</now>` 加原始正文。`/goal` 的 objective 不使用该 formatter，却作为首个 prompt 与 completion criteria；bot-owned MySQL、日志、workflow 和 debug timeline 继续遵循各自的脱敏契约，**个人自用的自托管 Langfuse Project 是明确例外：S08 写入完整明文业务 payload 与真实业务 ID**。目标限制以 4,000 Unicode rune 校验。App Server Thread/其 archive 的留存和访问控制不由 bot 改写，归运行账户所有者负责。
 
 默认调度值：最大活跃 Worker 20、单 Worker 队列深度 64、仅 `Idle` 状态空闲 30 分钟回收、`InProcess` 最长 90 分钟并以 10 秒优雅停止期收尾。Worker/队列属于后续 Story；Story 1 不实现它们。
 
@@ -152,7 +155,7 @@ codex-workspace-bot (Go 主进程)
   ├── HTTP Server (/health, /readyz)
   ├── Worker Pool (max 20)
   │     └── 每个 Worker 一个 goroutine
-  ├── Task Scheduler (gocron)
+  ├── Task Scheduler（MySQL task/run claim + Cron parser）
   ├── Cleanup Cron
   │
   └── 子进程: codex app-server --stdio
@@ -304,7 +307,7 @@ cmd.Env = []string{
 |------|------|
 | `thread/started` | 不需要，thread/start 已同步返回 |
 | `thread/name/updated` | 飞书场景不需要 |
-| `thread/goal/*` | 飞书场景不需要 |
+| `thread/goal/*` | GoalRun 必须按 threadId 路由，并驱动权威终态；不得按单一 turnId 丢弃 |
 | `thread/settings/updated` | 不关心 |
 | `skills/changed` | 不关心 |
 | `fs/changed` | 不关心 |
@@ -451,14 +454,14 @@ func (w *Worker) handleCardAction(action string, msg *Message) {
 | `/new` | Worker 控制屏障：清等待 FIFO、取消 active work/delivery、archive 后 CAS clear Thread | 静态确认卡；下一条普通文本创建新 Thread |
 | `/cancel`（`/stop` 兼容） | Worker 控制屏障：清等待 FIFO、取消 active work/delivery | 静态确认卡；Thread 保留 |
 | `/status` | Router receipt 后直接并发调用 `account/rateLimits/read` 与 `account/usage/read` | 静态状态卡，显示查询时间、bucket 百分比/窗口/reset；部分失败安全降级 |
-| `/goal <目标>` | Worker 独占工作项：resume 现有 Thread 后 `thread/goal/set` | 静态确认或无会话提示；目标只在内存/RPC 中存在 |
+| `/goal <目标>` | Worker 独占 GoalRun：ensure Thread → `thread/goal/set(active)` → objective `turn/start`；连续 Turn 持续关联至 Goal terminal | 正常流式卡/companion 交付与最终 Goal 状态；不发送静态成功确认 |
 | `/help` | Router receipt 后静态响应 | 固定命令帮助卡 |
 
 所有命令先持久化并去重。命令 effect 和 reply outcome 分开记录；静态 card 失败只尝试一次等价 text fallback，unknown 不重发。命令卡不修改活动 S04 输出卡，活动输出只由原 Batch 的 Terminal 路径收尾。
 
 ### 7.2 隐私与命令解析
 
-命令仅在 ASCII `/` 为首 rune 时识别，token 忽略大小写、外层 Unicode 空白；只有 `/goal` 接受非空 remainder。`/goal` 的 objective 不写 MySQL、日志、飞书、Langfuse、workflow 或 debug timeline；receipt 仅保存 `/goal [redacted]`、SHA-256 与字节长度。其余 slash 命令不带参数。全角斜杠仍是普通文本。
+命令仅在 ASCII `/` 为首 rune 时识别，token 忽略大小写、外层 Unicode 空白；只有 `/goal` 接受非空、最多 4,000 Unicode rune 的 remainder。`/goal` 的 objective 不写 MySQL、日志、飞书、workflow 或 debug timeline；**S08 的个人自用 Langfuse Project 按操作者裁决记录 objective 与其他业务原文**。receipt 仅保存 `/goal [redacted]`、SHA-256 与字节长度。唯一 App Server reader 在 raw timeline 写入前使用预注册的 thread→Goal registry 消毒 `params/result.goal.objective` 与首个 Goal `userMessage.content[].text`，保留 digest/byte length；不能安全判定的 Goal raw envelope fail closed，不写 raw。其余 slash 命令不带参数。全角斜杠仍是普通文本。
 
 ---
 
@@ -470,8 +473,7 @@ func (w *Worker) handleCardAction(action string, msg *Message) {
 workspaces/<app-id>/
 ├── AGENTS.md              # 项目指令；可配置 fallback 加载既有 CLAUDE.md
 ├── .agents/skills/        # 项目技能
-├── memory/                # 长期记忆（flock 保护）
-└── tasks/                 # 后续定时任务 YAML
+└── memory/                # 长期记忆（flock 保护）
 ```
 
 ### 8.2 初始化
@@ -524,6 +526,11 @@ CREATE TABLE chat_groups (
     chat_type VARCHAR(16) NOT NULL,
     chat_id VARCHAR(128) NOT NULL,
     codex_thread_id VARCHAR(128) NULL,
+    codex_tool_catalog_version VARCHAR(64) NOT NULL DEFAULT 's05-feishu-v2',
+    catalog_upgrade_state ENUM('stable', 'archive_pending', 'start_pending') NOT NULL DEFAULT 'stable',
+    catalog_upgrade_from_thread_id VARCHAR(128) NULL,
+    catalog_upgrade_target VARCHAR(64) NULL,
+    schedule_enabled BOOLEAN NOT NULL DEFAULT TRUE,
     last_message_at DATETIME(3) NULL,
     created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
     updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
@@ -566,6 +573,14 @@ S04 通过一条 forward-only migration 增加 `companion_delivery_batch_id` 与
 #### attachments 表（S05）
 
 附件下载后的 `relative_path` 是本机受控目录中 `session_id/attachment_id/<safe-original-name>` 的相对路径；`session_id` 和 `attachment_id` 都是 UUID，重复文件名由 attachment UUID 目录隔离。`relative_path` 使用 `VARCHAR(2048) CHARACTER SET utf8mb4`，以便最终安全叶名保留 Unicode；其 MySQL 唯一索引使用 700-character 前缀以满足 utf8mb4 的索引字节上限，受控路径中的 attachment UUID 位于此前缀内。下载先写入固定、有界的临时叶名，再原子 rename 到最终名；最终名按 UTF-8 字节数限制在文件系统单叶边界内，并尽量保留扩展名。清理兼容历史 `payload` 叶名，但只会删除 UUID 层级和受控叶名同时匹配的目录。
+
+#### 文档 Owner 转移（S05.1）
+
+`feishu.doc_create_and_announce` 创建 docx 后，必须只将该文档的 Owner 转给触发该 tool call 的可信 `sender_open_id`。该 sender identity 从 ingress 经 message/Worker 的 memory-only `ActorPrincipal` 传入 action route；group 的 `chat_id`、p2p/group 的 reply target、模型 tool arguments 都不得作为 Owner。调用 Drive `transfer_owner` 是 best-effort：文档 URL 仍是主交付，transfer rejected/unknown 只使公开 action result 返回 `owner_transferred:false` 和稳定 outcome，且绝不触发第二次文档创建或转移。document ID、open ID 和响应正文不得进入普通日志、workflow 或未加密 action result；S08 的个人自用 Langfuse Project 按裁决记录这些**业务**值。任何 token、header、Authorization/Cookie 与运行凭据仍不得进入任何外发观察面；同一 action call 的加密 replay 不重复副作用。
+
+#### scheduled_tasks / scheduled_task_runs / scheduled_task_deliveries / scheduled_task_tool_calls（S06）
+
+S06 的定时任务以 MySQL 为唯一真相源，而不是 workspace YAML、fsnotify 或调度库内存状态。`scheduled_tasks` 绑定 `app_id + chat_group_id + creator_open_id`，保存固定 `Asia/Shanghai` 的五字段 Cron、明文 Prompt 或直接本机 Script `command`、silent/enabled/version 和 UTC `next_run_at`。这是个人本地部署的明确产品选择：创建者、任务 payload、run payload 和 tool-call replay result 均可直接在 MySQL 检查；migration 006/007 由启动时一次性解密旧行、写入明文字段并清空旧密文字段。Prompt 工具参数的 Schema 必须要求 Agent 将当前用户需求改写为未来可独立执行的用户命令：未来 Agent 不带创建时对话上下文，必须保留动作、输入位置、筛选规则、交付物与交付渠道，将“发给我/给我”消歧为“发送到当前飞书会话”，且不得保留“你/我/这里/刚才”等上下文指代或附加未请求的步骤；调度器只原样传递该 payload，不自行拼接 Prompt。Script `command` 参数则保存用户要求的实际完整 shell 命令，不得自行添加步骤、参数或 `script_id` 登记要求。`scheduled_task_runs` 以 `UNIQUE(task_id, scheduled_for)`、claim token/queued/running lease 记录每个 slot 的不可变明文 payload、Prompt thread/turn 或 Script exit/output HMAC；未知中断绝不自动重放。`scheduled_task_deliveries` 为每次 result card 或 rejected 后 fallback text 建立独立 intent/outcome，unknown 永不重发。`scheduled_task_tool_calls` 以 App Server `app/thread/turn/call` identity 和明文 result 保持 `schedule.list_own/create/update` 的 at-most-once 回放。`schedule.update` 使用 `list_own` 返回的 `id`（而不是另名 `task_id`），可以可选携带同样返回的 `kind`；服务只接受与原任务相同的类型，绝不以它变更 `prompt|script`；任何 dynamic-tool Schema 改动均递增持久 catalog version，先 archive/start 新 Thread 再处理请求。历史 `scheduled_script_definitions` 表不再由 runtime 使用。S06 scheduler 只用 Cron parser 计算 `next_run_at`，由 `SELECT FOR UPDATE` MySQL transaction 领取 run；Prompt 以独立 ScheduledPrompt profile 进入既有同频道 Worker FIFO，Script 由 bot 当前 OS 用户在任务 App workspace 通过 `shell_path -c command` 直接执行；没有管理员登记、低权限或网络隔离。
 
 ### 9.2 内存队列
 
@@ -626,6 +641,26 @@ streaming:
   companion_segment_delay_ms: 400 # 仅覆盖旧 SegmentOptions.BaseDelay；其余延迟常量固定
   card_request_timeout_seconds: 10
 
+# ===== 定时任务 =====
+schedule:
+  tick_interval_ms: 1000
+  misfire_grace_seconds: 60
+  max_enabled_tasks_per_owner: 100
+  max_enabled_tasks_per_app: 1000
+  max_prompt_dispatch_per_tick: 20
+  payload_keys:                         # active key first；key_env 不进版本库
+    - version: 1
+      key_env: "CODEX_WORKSPACE_BOT_SCHEDULE_PAYLOAD_KEY_V1"
+  owner_hmac_keys:
+    - version: 1
+      key_env: "CODEX_WORKSPACE_BOT_SCHEDULE_OWNER_HMAC_KEY_V1"
+scripts:
+  enabled: false
+  shell_path: "/bin/sh"
+  timeout_seconds: 300
+  max_output_bytes: 24576
+  max_concurrent: 2
+
 # ===== 数据层 =====
 database:
   driver: "mysql"
@@ -637,12 +672,17 @@ database:
   max_open_conns: 10
   max_idle_conns: 5
 
-# ===== Langfuse =====
-langfuse:
-  enabled: true
-  host: "http://127.0.0.1:3000"
-  public_key_env: "LANGFUSE_PUBLIC_KEY"
-  secret_key_env: "LANGFUSE_SECRET_KEY"
+# ===== Langfuse（S08，个人自用自托管 Project） =====
+observability:
+  langfuse:
+    enabled: false
+    base_url: "https://langfuse.example.local"
+    public_key_env: "LANGFUSE_PUBLIC_KEY"
+    secret_key_env: "LANGFUSE_SECRET_KEY"
+    project_id: ""
+    environment: "development"
+    export_timeout_seconds: 2
+    max_queue_size: 4096
 
 # ===== HTTP Server =====
 server:
@@ -656,6 +696,8 @@ cleanup:
 ```
 
 `streaming` 是配置 schema 的一部分：缺失 `companion_segment_delay_ms` 使用 400；显式值必须满足 `0 < value <= 2000`，否则启动失败。实现时须同步 `config.yaml.template`、配置解析和该启动校验的单元测试。
+
+`scripts` 是个人本机的直接执行能力：当 `enabled=true` 时，启动校验只验证 `shell_path` 为绝对 regular executable，以及 timeout、输出上限和并发限制有效。Script command 以 bot 当前 OS 用户在任务 App workspace 通过 `shell_path -c command` 运行；不使用管理员登记、`script_id`、降权 runner、资源隔离或网络隔离。超时/取消仍杀死并回收整个进程组，避免遗留子进程。
 
 ### 10.2 环境变量（仅数据库密码等）
 
@@ -676,26 +718,11 @@ export LANGFUSE_SECRET_KEY="sk-xxx"
 
 **不用 hooks**，直接从 App Server Notification events 采集：
 
-Langfuse 当前遵从 W3C Trace Context：trace ID 是 32 位小写十六进制，observation ID 是 16 位小写十六进制。因此 `messages.trace_id` 不是 UUID，而是兼容的 32 hex ID；后续对 App Server JSON-RPC 使用同一 trace ID 构造 `traceparent`，并为每个 RPC 生成独立 16 hex span ID。Langfuse 为 metadata-only：不传原始飞书 ID、正文、附件、Secret 或 Token。
+Langfuse 遵从 W3C Trace Context：trace ID 是 32 位小写十六进制，observation ID 是 16 位小写十六进制。S08 以 Go OpenTelemetry OTLP/HTTP protobuf 向 `${base_url}/api/public/otel/v1/traces` 写入，使用现有 realtime `messages.trace_id` 或 claimed scheduled run 的持久化 32-hex `trace_id` 作为一棵 canonical Trace 的 root ID。
 
-```go
-type LangfuseReporter struct {
-    client *langfuse.Client
-}
+这是操作者个人自用的**新自托管 Project**，按明确裁决写入明文业务数据：prompt、用户 input/output、可获得的 App Server reasoning Item、工具参数/结果、文档/附件正文、OpenID、chat/message/document/file ID、路径和 URL。一个 Batch/Turn 一棵 Trace，Session ID 为 `app_id:chat_type:chat_id`，user ID 为 `sender_open_id`；不再提供 metadata-only、HMAC、ID hash 或内容脱敏开关。唯一排除项是运行凭据：Langfuse/飞书 key、Authorization、Cookie、access/refresh token、数据库密码和进程环境 secret。适配器只从 App Server notification/server-request 采集，使用有界 fail-open exporter；导出失败不阻塞 Codex、Worker 或飞书。
 
-func (r *LangfuseReporter) OnEvent(event *TurnEvent) {
-    switch event.Type {
-    case EventTurnStarted:
-        r.startTrace(event)
-    case EventDelta:
-        r.appendGeneration(event)
-    case EventCompleted:
-        r.endTrace(event, event.InputTokens, event.OutputTokens)
-    case EventFailed:
-        r.endTraceWithError(event)
-    }
-}
-```
+`turn/completed.usage` 是 Turn 与会话总计的唯一权威来源，原始 input/output/cached/reasoning/total counters 明文保存；只有当包含关系与 total 算术成立时，才映射为互斥的 Langfuse `usage_details` buckets。`thread/tokenUsage/updated` 只以 `(generation,seq)` 去重的快照 delta 累积到可证明的 `agent.loop`，绝不混入 session total。`turn_usage_ledger` 的 `(trace_id,turn_id)` 首次插入才事务性增加 `session_usage_totals`，防止重连、重复 terminal 或 exporter retry 双算。
 
 ### 11.2 可观测维度
 
@@ -728,9 +755,11 @@ slog.Info("turn_completed",
 
 本机服务自行维护 `logging.dir`（默认 `logs`）中的 JSON Lines 日志：普通服务日志为 `server.log`，工作流日志为 `server.log.wf`。日志级别只允许 `debug`、`info`、`error`，默认 `info`。后台任务每分钟检测时间边界：跨小时将 current 文件切分为 `server-YYYYMMDDHH.log`（以及 WF 对应文件），跨日将上一日的已切分文件移动到 `logs/YYYYMMDD/`。启动时补偿遗漏切分/归档；不依赖外部 cron/logrotate，也不在一期删除归档。
 
-S04 companion 每次 Feishu segment API result 后、下一段启动前，必须向 `server.log.wf` 追加 `event=companion_segment_delivery`：`batch_id,source_trace_ids,thread_id,turn_id,segment_index,text_sha256,result,reason|null,message_id|null,retry_count,at`。首次 429 用 `result=rejected,reason=rate_limited,retry_count=0` 记录，500ms 后同段重试为 `retry_count=1`；`reason` 仅可为稳定枚举。正文、marker、internal token、API 原文均不得记录；writer 失败即停止余段、形成 `companion_delivery_trace_incomplete`，不能静默继续。Langfuse 仅 fail-open 写无正文 metadata，不能取代这条本机证据。
+S04 companion 每次 Feishu segment API result 后、下一段启动前，必须向 `server.log.wf` 追加 `event=companion_segment_delivery`：`batch_id,source_trace_ids,thread_id,turn_id,segment_index,text_sha256,result,reason|null,message_id|null,retry_count,at`。首次 429 用 `result=rejected,reason=rate_limited,retry_count=0` 记录，500ms 后同段重试为 `retry_count=1`；`reason` 仅可为稳定枚举。正文、marker、internal token、API 原文均不得记录；writer 失败即停止余段、形成 `companion_delivery_trace_incomplete`，不能静默继续。S08 Langfuse 对应个人 Project 可写明文业务 trace，但仍 fail-open，不能取代这条本机 workflow 证据。
 
-**S03 个人本地调试例外**：当 `logging.level=debug`，唯一 App Server reader 在分类前按收到顺序 `Write+Sync` 每条完整的 server→client 原始 JSON-RPC event 到 `appserver-raw-<process-start>.ndjson`，并在 dispatch 前向 `appserver-event-<process-start>.jsonl` 写入同序号的结构化事件索引；dispatch 后向 `appserver-outcome-<process-start>.jsonl` 追加同 `seq` 的处理结果。event 至少区分时间/顺序、child generation、JSON-RPC 类别与 method/ID、App/Channel/ChatGroup/attempt、Thread/Turn/Item；outcome 记录最终路由与 dispatch 结果。按任一维度过滤、以 `seq` join 并排序可还原 event 时间线。任一 writer 失败即关闭该 generation，并将证据标记 incomplete，不能静默漏记 event。该例外不进入飞书、MySQL 或 Langfuse，测试完成后切回 `info`。不为此一次性 Story新增脱敏、留存或访问控制机制。
+每一个 outbound Feishu SDK 调用在完成后都必须以 Info 写入 `event=feishu_api_call`：`app_id,operation,outcome,code,subcode,log_id,duration_ms`。无论成功、平台拒绝、空响应还是 transport failure 都记录一条；`subcode` 仅从平台错误中解析数字，`log_id` 用于飞书侧排查。不得记录请求/响应正文、access token、原始 chat/message/document/file/image/open ID 或平台错误原文。
+
+**S03 个人本地调试例外**：当 `logging.level=debug`，唯一 App Server reader 在分类前按收到顺序 `Write+Sync` 每条 server→client 原始 JSON-RPC event 到 `appserver-raw-<process-start>.ndjson`，并在 dispatch 前向 `appserver-event-<process-start>.jsonl` 写入同序号的结构化事件索引；dispatch 后向 `appserver-outcome-<process-start>.jsonl` 追加同 `seq` 的处理结果。Goal 事件的原始写入必须先经过 S07 的 registry sanitizer；`objective`、首个 Goal userMessage text 以及无法安全判定的 Goal envelope 不得落盘。event 至少区分时间/顺序、child generation、JSON-RPC 类别与 method/ID、App/Channel/ChatGroup/attempt、Thread/Turn/Item；outcome 记录最终路由与 dispatch 结果。按任一维度过滤、以 `seq` join 并排序可还原 event 时间线。任一 writer 失败即关闭该 generation，并将证据标记 incomplete，不能静默漏记 event。该例外不进入飞书、MySQL 或 Langfuse，测试完成后切回 `info`。不为此一次性 Story新增脱敏、留存或访问控制机制。
 
 ---
 
@@ -760,12 +789,13 @@ S04 companion 每次 Feishu segment API result 后、下一段启动前，必须
 | 功能 | 模块 | 说明 |
 |------|------|------|
 | 欢迎事件 | feishu/ | Bot 入群 / 用户入群 |
-| 定时任务 | task/ | YAML → fsnotify → gocron |
+| 定时任务（S06） | schedule/ + storage/ + worker/ | Agent `schedule` dynamic tools → MySQL task/run/claim → Cron parser；Prompt 进入原频道 Worker FIFO，Shell 受控执行，静默仅抑制自动交付 |
 | 审批代理 | approval/ | 飞书审批卡片 |
 | Langfuse 集成 | observability/ | Token + 延迟 + 错误 |
 | 长期记忆 | workspace/ | flock 保护 |
 | 附件输入与清理（S05） | attachment/ + storage/ | Worker 下载、retention CAS 清理与本地路径输入 |
 | 飞书文档读取（S05） | feishuaction/ + feishu/ | 仅用当前 App 的 `Docx.Document.RawContent` 读取有效 docx URL，并把正文只交给当前 Codex Turn |
+| 文档 Owner 转移（S05.1） | feishuaction/ + feishu/ | 创建的单篇 docx 转给当前消息发起人；失败仍公告 URL，群聊不以 chat ID 代替 owner |
 
 ### 12.3 未来功能（P2）
 

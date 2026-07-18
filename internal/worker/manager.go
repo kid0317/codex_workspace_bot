@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -15,11 +16,14 @@ import (
 )
 
 var (
-	ErrQueueFull     = errors.New("worker queue full")
-	ErrPoolSaturated = errors.New("worker pool saturated")
-	ErrClosed        = errors.New("worker manager closed")
-	ErrStopping      = errors.New("worker stopping")
-	ErrWorkflowTrace = errors.New("companion_delivery_trace_incomplete")
+	ErrQueueFull               = errors.New("worker queue full")
+	ErrPoolSaturated           = errors.New("worker pool saturated")
+	ErrClosed                  = errors.New("worker manager closed")
+	ErrStopping                = errors.New("worker stopping")
+	ErrControlInProgress       = errors.New("channel control in progress")
+	ErrWorkflowTrace           = errors.New("companion_delivery_trace_incomplete")
+	ErrCommandDeliveryRejected = errors.New("command delivery rejected")
+	ErrCommandDeliveryUnknown  = errors.New("command delivery unknown")
 )
 
 type State string
@@ -44,17 +48,27 @@ func (k Key) String() string            { return k.Kind + ":" + k.Peer + ":" + k
 
 type ReplyTarget struct{ ID, Type string }
 
+// ActorPrincipal is ingress-derived, attempt-local authorization context. It
+// is intentionally memory-only: it must not be inferred from model arguments
+// or copied into logs, task definitions, or workflow traces.
+type ActorPrincipal struct{ OpenID string }
+
 type AppRuntime struct {
 	ID, WorkspaceDir, WorkspaceMode, Model, Effort string
 }
 
 type Message struct {
 	ID, TraceID, ChatGroupID string
-	Key                      Key
-	Runtime                  AppRuntime
-	Reply                    ReplyTarget
-	Query                    string
-	ReceivedAt               time.Time
+	// ChatType and ChatID retain the persistent conversation identity. P2P
+	// workers use sender OpenID as their queue key, so these cannot be derived
+	// from Key when S08 builds its Langfuse session usage identity.
+	ChatType, ChatID string
+	Key              Key
+	Runtime          AppRuntime
+	Reply            ReplyTarget
+	Actor            ActorPrincipal
+	Query            string
+	ReceivedAt       time.Time
 	// HasRequiredAttachment makes this message an exclusive FIFO batch. The
 	// owning worker must materialize its attachment before it can start a turn.
 	HasRequiredAttachment bool
@@ -62,14 +76,27 @@ type Message struct {
 	// AttachmentOutboxDir is assigned only by the attachment resolver for the
 	// active attachment batch. It is never persisted or logged.
 	AttachmentOutboxDir string
+	// Goal marks an exclusive batch whose Query is the native Codex goal
+	// objective. It is never merged with ordinary user input.
+	Goal bool
+	// ScheduledTaskRunID is assigned only by the trusted scheduler. It makes a
+	// synthetic Prompt an exclusive FIFO item and prevents it from using the
+	// normal message lifecycle/card ownership path.
+	ScheduledTaskID     string
+	ScheduledTaskRunID  string
+	ScheduledClaimToken string
 }
 
 type Batch struct {
-	ID       string
-	Key      Key
-	Runtime  AppRuntime
-	Messages []Message
-	OnItem   func(PresentationItem) bool
+	ID                  string
+	Key                 Key
+	Runtime             AppRuntime
+	Messages            []Message
+	OnItem              func(PresentationItem) bool
+	Goal                bool
+	ScheduledTaskID     string
+	ScheduledTaskRunID  string
+	ScheduledClaimToken string
 }
 
 type PresentationItem = presentation.Item
@@ -145,6 +172,10 @@ type ProcessResult struct {
 	// DurationMS is measured by the Codex adapter from accepted turn/start to its terminal outcome.
 	DurationMS       int64
 	ThreadID, TurnID string
+	// FinalText is populated only for a trusted ScheduledTaskRun while it is
+	// being finalized. It is not persisted or logged by Worker; the S06
+	// delivery outbox is its sole intended consumer.
+	FinalText string
 }
 type Processor func(context.Context, Batch) (ProcessResult, error)
 
@@ -152,6 +183,29 @@ type Lifecycle interface {
 	MarkProcessing(context.Context, []string) error
 	Complete(context.Context, []string, string, string, int64) error
 	Fail(context.Context, []string, string, int64) error
+}
+
+// ScheduledRunLifecycle owns only S06 run state. It intentionally has no
+// message IDs or card IDs, so synthetic prompts cannot mutate normal ingress
+// message state or S04 card ownership.
+type ScheduledRunLifecycle interface {
+	MarkScheduledRunning(context.Context, string, string) error
+	CompleteScheduledRun(context.Context, string, string, bool, string, int64) error
+}
+
+// ScheduledRunResultLifecycle receives the ephemeral App Server final text
+// for an S06 Prompt. It is deliberately separate from the normal Lifecycle:
+// synthetic messages do not own message rows or S04 cards.
+type ScheduledRunResultLifecycle interface {
+	ScheduledRunLifecycle
+	CompleteScheduledRunResult(context.Context, string, string, bool, string, int64, string, string, string) error
+}
+
+// ScheduledRunDiscardLifecycle owns queued scheduled runs removed by a channel
+// control barrier. It deliberately has no delivery method: a /new or /cancel
+// must not later publish a result card for work that never started.
+type ScheduledRunDiscardLifecycle interface {
+	DiscardScheduledRun(context.Context, string, string, string) error
 }
 
 type CompanionDeliverySummary struct {
@@ -177,15 +231,31 @@ type Config struct {
 }
 
 type Manager struct {
-	cfg       Config
-	outputFor OutputForBatch
-	processor Processor
-	ctx       context.Context
-	cancel    context.CancelFunc
-	mu        sync.Mutex
-	workers   map[string]*channelWorker
-	sequence  atomic.Uint64
-	lifecycle Lifecycle
+	cfg          Config
+	outputFor    OutputForBatch
+	processor    Processor
+	ctx          context.Context
+	cancel       context.CancelFunc
+	mu           sync.Mutex
+	workers      map[string]*channelWorker
+	shuttingDown bool
+	sequence     atomic.Uint64
+	lifecycle    Lifecycle
+	goalStop     GoalRunController
+}
+
+// GoalRunController is implemented by the Codex runtime. It owns the
+// pause-confirmation and turn-drain protocol for a live Goal batch.
+type GoalRunController interface {
+	RequestGoalStop(context.Context, string) error
+}
+
+// Control is owned by a channel worker. Its Run function executes only after
+// any active batch has released the channel, so thread mutations cannot race a
+// turn or companion delivery from the same conversation.
+type Control struct {
+	Run     func(context.Context) error
+	OnError func(context.Context, error)
 }
 
 func NewManager(cfg Config, outputFor OutputForBatch, processor Processor, lifecycle ...Lifecycle) *Manager {
@@ -218,7 +288,7 @@ func NewManager(cfg Config, outputFor OutputForBatch, processor Processor, lifec
 func (m *Manager) Accept(_ context.Context, message Message) error {
 	key := message.Key.String()
 	m.mu.Lock()
-	if m.ctx.Err() != nil {
+	if m.ctx.Err() != nil || m.shuttingDown {
 		m.mu.Unlock()
 		return ErrClosed
 	}
@@ -236,7 +306,107 @@ func (m *Manager) Accept(_ context.Context, message Message) error {
 	return w.enqueue(message)
 }
 
-func (m *Manager) Close() { m.cancel() }
+func (m *Manager) Close() {
+	m.mu.Lock()
+	m.shuttingDown = true
+	workers := make([]*channelWorker, 0, len(m.workers))
+	for _, w := range m.workers {
+		workers = append(workers, w)
+	}
+	m.mu.Unlock()
+	// Persist queued work before cancelling the manager context. In particular,
+	// S06 runs are otherwise left queued until restart reconciliation merely
+	// because the worker loop exits before it can observe its queue again.
+	for _, w := range workers {
+		w.discardQueuedForShutdown(context.Background())
+	}
+	m.cancel()
+}
+
+// Shutdown blocks new ingress, routes every active worker through the same
+// control path as /cancel, and waits for each active batch to release before
+// tearing down the shared runtime. Goal batches keep their existing
+// pause-confirmation -> interrupt ordering through submitControl.
+func (m *Manager) Shutdown(ctx context.Context) error {
+	if ctx == nil {
+		return errors.New("shutdown context is required")
+	}
+	m.mu.Lock()
+	if m.ctx.Err() != nil {
+		m.mu.Unlock()
+		return nil
+	}
+	m.shuttingDown = true
+	workers := make([]*channelWorker, 0, len(m.workers))
+	for _, w := range m.workers {
+		workers = append(workers, w)
+	}
+	m.mu.Unlock()
+	if len(workers) == 0 {
+		m.Close()
+		return nil
+	}
+
+	errCh := make(chan error, len(workers))
+	for _, w := range workers {
+		w := w
+		go func() {
+			if err := w.submitControl(ctx, Control{Run: func(context.Context) error { return nil }}); err != nil && !errors.Is(err, ErrStopping) {
+				errCh <- err
+				return
+			}
+			if err := m.Cancel(ctx, w.key); err != nil {
+				errCh <- err
+				return
+			}
+			errCh <- nil
+		}()
+	}
+	var errs []error
+	for range workers {
+		select {
+		case err := <-errCh:
+			if err != nil {
+				errs = append(errs, err)
+			}
+		case <-ctx.Done():
+			errs = append(errs, ctx.Err())
+			m.Close()
+			return errors.Join(errs...)
+		}
+	}
+	m.Close()
+	return errors.Join(errs...)
+}
+
+func (m *Manager) SetGoalRunController(controller GoalRunController) { m.goalStop = controller }
+
+// SubmitControl establishes a channel barrier immediately, cancels the
+// active batch, and schedules the supplied effect behind that batch. Normal
+// ingress is rejected while the barrier is held instead of crossing a /new or
+// /cancel boundary.
+func (m *Manager) SubmitControl(ctx context.Context, key Key, control Control) error {
+	if control.Run == nil {
+		return errors.New("control run is required")
+	}
+	m.mu.Lock()
+	if m.ctx.Err() != nil || m.shuttingDown {
+		m.mu.Unlock()
+		return ErrClosed
+	}
+	w := m.workers[key.String()]
+	if w == nil {
+		if len(m.workers) >= m.cfg.MaxWorkers {
+			m.mu.Unlock()
+			return ErrPoolSaturated
+		}
+		w = &channelWorker{manager: m, key: key, state: Idle, idleAt: time.Now(), wake: make(chan struct{}, 1), stop: make(chan struct{})}
+		m.workers[key.String()] = w
+		go w.run(m.ctx)
+	}
+	m.mu.Unlock()
+	return w.submitControl(ctx, control)
+}
 
 // Cancel serializes a control command with the channel worker. It does not
 // remove already-visible Feishu messages; it cancels the active turn or the
@@ -292,12 +462,16 @@ type channelWorker struct {
 	key             Key
 	mu              sync.Mutex
 	queue           []Message
+	controls        []Control
+	barrier         bool
 	processing      bool
 	state           State
 	idleAt          time.Time
 	activeCancel    context.CancelFunc
 	activeDone      chan struct{}
 	activeCancelled bool
+	activeBatchID   string
+	activeGoal      bool
 	terminal        *TerminalArbiter
 	delivery        *DeliverySlot
 	done            chan struct{}
@@ -308,8 +482,16 @@ type channelWorker struct {
 func (w *channelWorker) setActive(cancel context.CancelFunc) {
 	w.mu.Lock()
 	w.activeCancel = cancel
-	w.activeDone = make(chan struct{})
-	w.activeCancelled = false
+	cancelNow := w.activeCancelled
+	w.mu.Unlock()
+	if cancelNow {
+		cancel()
+	}
+}
+
+func (w *channelWorker) setGoalBatch(batch Batch) {
+	w.mu.Lock()
+	w.activeBatchID, w.activeGoal = batch.ID, batch.Goal
 	w.mu.Unlock()
 }
 
@@ -327,7 +509,9 @@ func (w *channelWorker) clearActive() {
 	w.mu.Lock()
 	done := w.activeDone
 	w.activeCancel, w.activeDone = nil, nil
+	w.activeBatchID, w.activeGoal = "", false
 	w.activeCancelled = false
+	w.terminal = nil
 	w.mu.Unlock()
 	if done != nil {
 		close(done)
@@ -352,6 +536,10 @@ func (w *channelWorker) enqueue(message Message) error {
 		w.mu.Unlock()
 		return ErrStopping
 	}
+	if w.barrier {
+		w.mu.Unlock()
+		return ErrControlInProgress
+	}
 	if len(w.queue) >= w.manager.cfg.QueueDepth {
 		w.mu.Unlock()
 		return ErrQueueFull
@@ -360,6 +548,91 @@ func (w *channelWorker) enqueue(message Message) error {
 	w.mu.Unlock()
 	w.signal()
 	return nil
+}
+
+func (w *channelWorker) submitControl(ctx context.Context, control Control) error {
+	w.mu.Lock()
+	if w.state == Stopping || w.state == Stopped {
+		w.mu.Unlock()
+		return ErrStopping
+	}
+	pending := append([]Message(nil), w.queue...)
+	w.queue = nil
+	w.barrier = true
+	w.controls = append(w.controls, control)
+	cancel := w.activeCancel
+	batchID, goal := w.activeBatchID, w.activeGoal
+	goalStop := w.manager.goalStop
+	w.activeCancelled = true
+	if w.terminal != nil {
+		w.terminal.Claim("cancelled")
+	}
+	w.mu.Unlock()
+	if goal && goalStop != nil {
+		if err := goalStop.RequestGoalStop(ctx, batchID); err != nil {
+			// Keep the barrier and Goal owner fail-closed. Falling back to a
+			// context cancel would interrupt before pause confirmation and let a
+			// later /new archive an active Goal.
+			return fmt.Errorf("request goal pause: %w", err)
+		}
+		cancel = nil // GoalAttempt owns pause -> interrupt -> drain.
+	}
+	if cancel != nil {
+		cancel()
+	}
+	if len(pending) > 0 && w.manager.lifecycle != nil {
+		ids := make([]string, 0, len(pending))
+		for _, message := range pending {
+			if message.ScheduledTaskRunID == "" {
+				ids = append(ids, message.ID)
+				continue
+			}
+			discarder, ok := w.manager.lifecycle.(ScheduledRunDiscardLifecycle)
+			if !ok {
+				return fmt.Errorf("persist detached scheduled run: lifecycle is unavailable")
+			}
+			if err := discarder.DiscardScheduledRun(ctx, message.ScheduledTaskRunID, message.ScheduledClaimToken, "cancelled_by_channel_control"); err != nil {
+				return fmt.Errorf("persist detached scheduled run: %w", err)
+			}
+		}
+		if len(ids) > 0 {
+			if err := w.manager.lifecycle.Fail(ctx, ids, "cancelled_by_command", 0); err != nil {
+				return fmt.Errorf("persist detached queue: %w", err)
+			}
+		}
+	}
+	w.signal()
+	return nil
+}
+
+func (w *channelWorker) discardQueuedForShutdown(ctx context.Context) {
+	w.mu.Lock()
+	pending := append([]Message(nil), w.queue...)
+	w.queue = nil
+	w.mu.Unlock()
+	if len(pending) == 0 || w.manager.lifecycle == nil {
+		return
+	}
+	ids := make([]string, 0, len(pending))
+	for _, message := range pending {
+		if message.ScheduledTaskRunID == "" {
+			ids = append(ids, message.ID)
+			continue
+		}
+		discarder, ok := w.manager.lifecycle.(ScheduledRunDiscardLifecycle)
+		if !ok {
+			slog.Error("scheduled_run_shutdown_discard_unavailable", "event", "scheduled_run_shutdown_discard_unavailable", "run_id", message.ScheduledTaskRunID)
+			continue
+		}
+		if err := discarder.DiscardScheduledRun(ctx, message.ScheduledTaskRunID, message.ScheduledClaimToken, "cancelled_by_channel_control"); err != nil {
+			slog.Error("scheduled_run_shutdown_discard_failed", "event", "scheduled_run_shutdown_discard_failed", "run_id", message.ScheduledTaskRunID, "error", err)
+		}
+	}
+	if len(ids) > 0 {
+		if err := w.manager.lifecycle.Fail(ctx, ids, "worker_shutdown_stopped", 0); err != nil {
+			slog.Error("worker_shutdown_queue_persist_failed", "event", "worker_shutdown_queue_persist_failed", "channel_key", w.key.String(), "error", err)
+		}
+	}
 }
 
 func (w *channelWorker) signal() {
@@ -379,6 +652,11 @@ func (w *channelWorker) run(ctx context.Context) {
 		case <-w.wake:
 		}
 		for {
+			control, hasControl := w.nextControl()
+			if hasControl {
+				w.processControl(ctx, control)
+				continue
+			}
 			batch, ok := w.nextBatch()
 			if !ok {
 				break
@@ -386,6 +664,44 @@ func (w *channelWorker) run(ctx context.Context) {
 			w.process(ctx, batch)
 		}
 	}
+}
+
+func (w *channelWorker) nextControl() (Control, bool) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.processing || len(w.controls) == 0 {
+		return Control{}, false
+	}
+	control := w.controls[0]
+	w.controls = w.controls[1:]
+	return control, true
+}
+
+func (w *channelWorker) processControl(parent context.Context, control Control) {
+	ctx, cancel := context.WithTimeout(parent, w.manager.cfg.StopGrace)
+	defer cancel()
+	w.mu.Lock()
+	done := w.activeDone
+	delivery := w.delivery
+	w.mu.Unlock()
+	if delivery != nil {
+		_ = delivery.CancelAndWait(ctx)
+	}
+	if done != nil {
+		select {
+		case <-done:
+		case <-ctx.Done():
+		}
+	}
+	if err := control.Run(context.Background()); err != nil && control.OnError != nil {
+		control.OnError(context.Background(), err)
+	}
+	w.mu.Lock()
+	if len(w.controls) == 0 {
+		w.barrier = false
+	}
+	w.mu.Unlock()
+	w.signal()
 }
 
 func (w *channelWorker) nextBatch() (Batch, bool) {
@@ -396,6 +712,24 @@ func (w *channelWorker) nextBatch() (Batch, bool) {
 	}
 	batchSize := len(w.queue)
 	for index, message := range w.queue {
+		if index > 0 && message.Actor.OpenID != w.queue[0].Actor.OpenID {
+			batchSize = index
+			break
+		}
+		if message.Goal {
+			batchSize = index
+			if index == 0 {
+				batchSize = 1
+			}
+			break
+		}
+		if message.ScheduledTaskRunID != "" {
+			batchSize = index
+			if index == 0 {
+				batchSize = 1
+			}
+			break
+		}
 		if !message.HasRequiredAttachment {
 			continue
 		}
@@ -410,11 +744,19 @@ func (w *channelWorker) nextBatch() (Batch, bool) {
 	w.queue = w.queue[batchSize:]
 	w.processing = true
 	w.state = CreatingCard
+	w.activeCancel = nil
+	w.activeDone = make(chan struct{})
+	w.activeCancelled = false
+	w.terminal = NewTerminalArbiter()
 	id := uuid.NewString()
-	return Batch{ID: id, Key: w.key, Runtime: messages[0].Runtime, Messages: messages}, true
+	return Batch{ID: id, Key: w.key, Runtime: messages[0].Runtime, Messages: messages, Goal: messages[0].Goal, ScheduledTaskID: messages[0].ScheduledTaskID, ScheduledTaskRunID: messages[0].ScheduledTaskRunID, ScheduledClaimToken: messages[0].ScheduledClaimToken}, true
 }
 
 func (w *channelWorker) process(parent context.Context, batch Batch) {
+	if batch.ScheduledTaskRunID != "" {
+		w.processScheduled(parent, batch)
+		return
+	}
 	messageIDs := make([]string, len(batch.Messages))
 	for i, message := range batch.Messages {
 		messageIDs[i] = message.ID
@@ -518,6 +860,7 @@ func (w *channelWorker) process(parent context.Context, batch Batch) {
 			slog.Info("batch_started", "batch_id", batch.ID, "channel_key", batch.Key.String(), "batch_size", len(batch.Messages))
 			ctx, cancel := context.WithTimeout(parent, w.manager.cfg.ProcessTimeout)
 			w.setActive(cancel)
+			w.setGoalBatch(batch)
 			defer w.clearActive()
 			result := make(chan struct {
 				result ProcessResult
@@ -539,11 +882,20 @@ func (w *channelWorker) process(parent context.Context, batch Batch) {
 				w.mu.Lock()
 				w.state = Stopping
 				w.mu.Unlock()
-				select {
-				case completed := <-result:
-					processResult, err = completed.result, completed.err
-				case <-time.After(w.manager.cfg.StopGrace):
-				}
+				// Keep channel ownership until the processor has observed the
+				// cancellation. A delayed turn/start may still bind a turn ID and
+				// must be interrupted before /new can archive the Thread.
+				completed := <-result
+				processResult, err = completed.result, completed.err
+			}
+			w.mu.Lock()
+			terminalReason := ""
+			if w.terminal != nil {
+				terminalReason = w.terminal.Reason()
+			}
+			w.mu.Unlock()
+			if terminalReason == "cancelled" {
+				err = context.Canceled
 			}
 			cancel()
 			if drainPresentation != nil {
@@ -554,11 +906,28 @@ func (w *channelWorker) process(parent context.Context, batch Batch) {
 			durationMS := processResult.DurationMS
 			processorFailed := err != nil
 			content := "本轮已完成。"
+			if batch.Goal {
+				content = "目标已完成，但未收到可展示的最终摘要；请检查已完成的操作与日志。"
+			}
 			if projection != nil && projection.Final() != "" {
 				content = projection.Final()
 			}
+			progress := ""
+			if projection != nil {
+				progress = projection.Progress()
+			}
+			if batch.Goal && progress == "" && err == nil {
+				progress = "目标已完成；本轮未收到可展示的阶段进展。"
+			}
 			if errors.Is(err, context.DeadlineExceeded) {
-				if updateErr := output.UpdateBatchCard(parent, cardID, "本批处理超时，请重新发送。"); updateErr != nil {
+				timeoutContent := "本批处理超时，请重新发送。"
+				var updateErr error
+				if zoneOutput, ok := output.(DualZoneOutput); ok && batch.Goal {
+					updateErr = zoneOutput.UpdateBatchCardZones(parent, cardID, timeoutContent, goalTerminalProgress(err), "目标未完成", true)
+				} else {
+					updateErr = output.UpdateBatchCard(parent, cardID, timeoutContent)
+				}
+				if updateErr != nil {
 					_, _ = output.SendBatchText(parent, batch.Messages[0].Reply, "本批处理超时，请重新发送。")
 				}
 				if w.manager.lifecycle != nil {
@@ -566,8 +935,14 @@ func (w *channelWorker) process(parent context.Context, batch Batch) {
 				}
 			} else if err != nil {
 				slog.Error("batch_processor_failed", "event", "batch_processor_failed", "batch_id", batch.ID, "channel_key", batch.Key.String(), "error", err)
-				failure := "本批处理失败，请重新发送。"
-				if updateErr := output.UpdateBatchCard(parent, cardID, failure); updateErr != nil {
+				failure := failureMessage(batch, err)
+				var updateErr error
+				if zoneOutput, ok := output.(DualZoneOutput); ok && batch.Goal {
+					updateErr = zoneOutput.UpdateBatchCardZones(parent, cardID, failure, goalTerminalProgress(err), "目标未完成", true)
+				} else {
+					updateErr = output.UpdateBatchCard(parent, cardID, failure)
+				}
+				if updateErr != nil {
 					_, _ = output.SendBatchText(parent, batch.Messages[0].Reply, failure)
 				}
 				if w.manager.lifecycle != nil {
@@ -576,7 +951,11 @@ func (w *channelWorker) process(parent context.Context, batch Batch) {
 			} else {
 				var updateErr error
 				if zoneOutput, ok := output.(DualZoneOutput); ok && projection != nil {
-					updateErr = zoneOutput.UpdateBatchCardZones(parent, cardID, content, projection.Progress(), "已完成", true)
+					summary := "已完成"
+					if batch.Goal {
+						summary = "目标已完成"
+					}
+					updateErr = zoneOutput.UpdateBatchCardZones(parent, cardID, content, progress, summary, true)
 				} else {
 					updateErr = output.UpdateBatchCard(parent, cardID, content)
 				}
@@ -637,6 +1016,126 @@ func (w *channelWorker) process(parent context.Context, batch Batch) {
 	}
 }
 
+func (w *channelWorker) processScheduled(parent context.Context, batch Batch) {
+	lifecycle, ok := w.manager.lifecycle.(ScheduledRunLifecycle)
+	if !ok || batch.ScheduledClaimToken == "" {
+		w.finishScheduled(parent, batch, false, "failed_lifecycle", 0, "", "", "", false)
+		return
+	}
+	if err := lifecycle.MarkScheduledRunning(parent, batch.ScheduledTaskRunID, batch.ScheduledClaimToken); err != nil {
+		w.finishScheduled(parent, batch, false, "failed_run_claim", 0, "", "", "", false)
+		return
+	}
+	ctx, cancel := context.WithTimeout(parent, w.manager.cfg.ProcessTimeout)
+	w.setActive(cancel)
+	defer w.clearActive()
+	started := time.Now()
+	result, err := w.manager.processor(ctx, batch)
+	cancel()
+	if err == nil && w.terminal != nil && w.terminal.Reason() == "cancelled" {
+		err = context.Canceled
+	}
+	code := ""
+	if err != nil {
+		code = terminalErrorCode(err)
+		if errors.Is(err, context.Canceled) && w.terminal != nil && w.terminal.Reason() == "cancelled" {
+			code = "cancelled_by_channel_control"
+		}
+	}
+	duration := result.DurationMS
+	if duration == 0 {
+		duration = time.Since(started).Milliseconds()
+	}
+	w.finishScheduled(parent, batch, err == nil, code, duration, result.FinalText, result.ThreadID, result.TurnID, errors.Is(err, context.DeadlineExceeded))
+}
+
+func (w *channelWorker) finishScheduled(parent context.Context, batch Batch, succeeded bool, code string, duration int64, finalText, threadID, turnID string, stopAfterTimeout bool) {
+	if code == "cancelled_by_channel_control" {
+		if lifecycle, ok := w.manager.lifecycle.(ScheduledRunDiscardLifecycle); ok && batch.ScheduledClaimToken != "" {
+			_ = lifecycle.DiscardScheduledRun(parent, batch.ScheduledTaskRunID, batch.ScheduledClaimToken, code)
+			if stopAfterTimeout {
+				w.stopAfterScheduledTimeout(parent)
+				return
+			}
+			w.finishScheduledWorkerState()
+			return
+		}
+	}
+	if lifecycle, ok := w.manager.lifecycle.(ScheduledRunResultLifecycle); ok && batch.ScheduledClaimToken != "" {
+		_ = lifecycle.CompleteScheduledRunResult(parent, batch.ScheduledTaskRunID, batch.ScheduledClaimToken, succeeded, code, duration, finalText, threadID, turnID)
+	} else if lifecycle, ok := w.manager.lifecycle.(ScheduledRunLifecycle); ok && batch.ScheduledClaimToken != "" {
+		_ = lifecycle.CompleteScheduledRun(parent, batch.ScheduledTaskRunID, batch.ScheduledClaimToken, succeeded, code, duration)
+	}
+	if stopAfterTimeout {
+		w.stopAfterScheduledTimeout(parent)
+		return
+	}
+	w.finishScheduledWorkerState()
+}
+
+// stopAfterScheduledTimeout prevents a timed-out scheduled turn from allowing
+// a later queued turn in the same channel to cross its terminal boundary.
+func (w *channelWorker) stopAfterScheduledTimeout(ctx context.Context) {
+	w.mu.Lock()
+	w.processing = false
+	w.state = Stopped
+	pending := append([]Message(nil), w.queue...)
+	w.queue = nil
+	w.mu.Unlock()
+	if w.manager.lifecycle != nil {
+		ordinaryIDs := make([]string, 0, len(pending))
+		for _, message := range pending {
+			if message.ScheduledTaskRunID == "" {
+				ordinaryIDs = append(ordinaryIDs, message.ID)
+				continue
+			}
+			discarder, ok := w.manager.lifecycle.(ScheduledRunDiscardLifecycle)
+			if !ok {
+				slog.Error("scheduled_run_timeout_discard_unavailable", "event", "scheduled_run_timeout_discard_unavailable", "run_id", message.ScheduledTaskRunID)
+				continue
+			}
+			if err := discarder.DiscardScheduledRun(ctx, message.ScheduledTaskRunID, message.ScheduledClaimToken, "cancelled_by_channel_control"); err != nil {
+				slog.Error("scheduled_run_timeout_discard_failed", "event", "scheduled_run_timeout_discard_failed", "run_id", message.ScheduledTaskRunID, "error", err)
+			}
+		}
+		if len(ordinaryIDs) > 0 {
+			if err := w.manager.lifecycle.Fail(ctx, ordinaryIDs, "worker_timeout_stopped", 0); err != nil {
+				slog.Error("scheduled_run_timeout_queue_persist_failed", "event", "scheduled_run_timeout_queue_persist_failed", "channel_key", w.key.String(), "error", err)
+			}
+		}
+	}
+	w.removeFromManager()
+}
+
+func (w *channelWorker) finishScheduledWorkerState() {
+	w.mu.Lock()
+	w.processing = false
+	w.state = Idle
+	w.idleAt = time.Now()
+	hasMore := len(w.queue) > 0
+	w.mu.Unlock()
+	if hasMore {
+		w.signal()
+	} else {
+		w.scheduleIdleRecycle()
+	}
+}
+
+func goalTerminalProgress(err error) string {
+	switch {
+	case errors.Is(err, context.DeadlineExceeded):
+		return "目标执行超时，未完成。"
+	case errors.Is(err, context.Canceled):
+		return "目标已中断。"
+	case strings.Contains(err.Error(), `goal terminal status "paused"`):
+		return "目标已暂停。"
+	case strings.Contains(err.Error(), `goal terminal status "budget_limited"`):
+		return "目标达到预算限制，未宣告完成。"
+	default:
+		return "目标执行未完成。"
+	}
+}
+
 func terminalErrorCode(err error) string {
 	if err != nil && err.Error() == "presentation_backpressure" {
 		return "presentation_backpressure"
@@ -644,8 +1143,28 @@ func terminalErrorCode(err error) string {
 	return "worker_process_failed"
 }
 
+func failureMessage(batch Batch, err error) string {
+	if !batch.Goal || err == nil {
+		return "本批处理失败，请重新发送。"
+	}
+	switch {
+	case strings.Contains(err.Error(), `goal terminal status "paused"`):
+		return "目标已暂停。"
+	case strings.Contains(err.Error(), `goal terminal status "budget_limited"`):
+		return "目标达到预算限制，未宣告完成。"
+	default:
+		return "目标执行未完成，请稍后重新发起。"
+	}
+}
+
 func (w *channelWorker) processCompanion(parent context.Context, batch Batch, messageIDs []string, output Output, err error) {
-	terminal := NewTerminalArbiter()
+	w.mu.Lock()
+	terminal := w.terminal
+	if terminal == nil {
+		terminal = NewTerminalArbiter()
+		w.terminal = terminal
+	}
+	w.mu.Unlock()
 	delivery := NewDeliverySlot()
 	w.setCompanionControl(terminal, delivery)
 	defer w.clearCompanionControl()
@@ -668,6 +1187,7 @@ func (w *channelWorker) processCompanion(parent context.Context, batch Batch, me
 		w.mu.Unlock()
 		ctx, cancel := context.WithTimeout(parent, w.manager.cfg.ProcessTimeout)
 		w.setActive(cancel)
+		w.setGoalBatch(batch)
 		defer w.clearActive()
 		result := make(chan struct {
 			result ProcessResult
@@ -689,11 +1209,8 @@ func (w *channelWorker) processCompanion(parent context.Context, batch Batch, me
 			w.mu.Lock()
 			w.state = Stopping
 			w.mu.Unlock()
-			select {
-			case completed := <-result:
-				processResult, err = completed.result, completed.err
-			case <-time.After(w.manager.cfg.StopGrace):
-			}
+			completed := <-result
+			processResult, err = completed.result, completed.err
 		}
 		if terminal.Reason() == "cancelled" {
 			err = context.Canceled

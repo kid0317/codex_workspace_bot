@@ -10,6 +10,61 @@ import (
 	"github.com/kid0317/codex-workspace-bot/internal/storage"
 )
 
+func TestPrepareCatalogUpgradePersistsArchivePendingBeforeExternalArchive(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	store := &storage.Store{DB: db}
+	mock.ExpectBegin()
+	mock.ExpectQuery("SELECT codex_thread_id,codex_tool_catalog_version,catalog_upgrade_state,catalog_upgrade_from_thread_id,catalog_upgrade_target FROM chat_groups WHERE id=\\? FOR UPDATE").
+		WithArgs("group-1").
+		WillReturnRows(sqlmock.NewRows([]string{"codex_thread_id", "codex_tool_catalog_version", "catalog_upgrade_state", "catalog_upgrade_from_thread_id", "catalog_upgrade_target"}).AddRow("thread-old", "s05-feishu-v2", "stable", nil, nil))
+	mock.ExpectExec("UPDATE chat_groups SET catalog_upgrade_state='archive_pending'").
+		WithArgs("thread-old", "s06-schedule-v1", "group-1").
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
+
+	state, err := store.PrepareCatalogUpgrade(context.Background(), "group-1", "s06-schedule-v1")
+	if err != nil {
+		t.Fatalf("PrepareCatalogUpgrade() error = %v", err)
+	}
+	if state.State != storage.CatalogUpgradeArchivePending || state.FromThreadID != "thread-old" || state.Target != "s06-schedule-v1" || state.CurrentVersion != "s05-feishu-v2" {
+		t.Fatalf("PrepareCatalogUpgrade() = %#v", state)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestCatalogUpgradeAdvanceAndCompleteUseConditionalTransitions(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	store := &storage.Store{DB: db}
+	mock.ExpectExec("UPDATE chat_groups SET codex_thread_id=NULL,catalog_upgrade_state='start_pending'").
+		WithArgs("group-1", "thread-old").
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec("UPDATE chat_groups SET codex_thread_id=\\?,codex_toolset_version=\\?,codex_tool_catalog_version=\\?,catalog_upgrade_state='stable'").
+		WithArgs("thread-new", "s06-schedule-v1", "s06-schedule-v1", "group-1", "s06-schedule-v1").
+		WillReturnResult(sqlmock.NewResult(0, 1))
+
+	advanced, err := store.AdvanceCatalogUpgradeAfterArchive(context.Background(), "group-1", "thread-old")
+	if err != nil || !advanced {
+		t.Fatalf("AdvanceCatalogUpgradeAfterArchive() advanced=%t err=%v", advanced, err)
+	}
+	completed, err := store.CompleteCatalogUpgrade(context.Background(), "group-1", "s06-schedule-v1", "thread-new")
+	if err != nil || !completed {
+		t.Fatalf("CompleteCatalogUpgrade() completed=%t err=%v", completed, err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestCreateMessageReportsDuplicateEvent(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	if err != nil {
