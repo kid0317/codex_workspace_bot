@@ -22,6 +22,7 @@ Codex Workspace Bot 是一个本机自用的飞书 Bot 编排器：用户在飞�
 - [需求分析](docs/00-requirements-analysis.md)
 - [PRD](docs/03-product-requirements.md)
 - [概要设计](docs/02-redesign-high-level.md)
+- [数据库建表与迁移](docs/04-database-schema.md)
 - [Story List](docs/story/STORY_LIST.md)
 - [开源安全清单](docs/open-source-readiness.md)
 
@@ -70,6 +71,18 @@ openssl rand -base64 32
 ```
 
 这些 key 应保持稳定；不要每次启动重新生成，否则旧的附件引用、action 结果或历史调度数据可能无法读取。
+
+## 数据库建表与迁移
+
+建表和迁移 SQL 已提交在 [`migrations/`](migrations/) 目录。首次启动不需要手工导入 SQL；`cmd/server` 和 `cmd/appctl` 会自动按文件名顺序执行尚未应用的迁移，并在 MySQL 中维护 `schema_migrations` 表。
+
+可以用下面的命令在配置好 MySQL 后触发一次迁移检查：
+
+```bash
+go run ./cmd/appctl list --config ./config.yaml
+```
+
+迁移文件清单和手工恢复注意事项见 [数据库建表与迁移](docs/04-database-schema.md)。
 
 ## 飞书应用准备
 
