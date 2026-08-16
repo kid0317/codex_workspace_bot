@@ -1,0 +1,15 @@
+**
+!go.mod
+!go.sum
+!cmd/**
+!internal/**
+!migrations/**
+
+**/.env
+**/.secrets/**
+**/*token*.json
+**/*.pem
+**/*.key
+**/config.json
+**/auth.json
+

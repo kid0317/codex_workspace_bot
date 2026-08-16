@@ -33,4 +33,3 @@ func TestChildEnvironmentUnsetAllowlistPreservesNativeMode(t *testing.T) {
 		t.Fatalf("child environment = %#v, want native environment %#v", got, ambient)
 	}
 }
-

@@ -100,4 +100,3 @@ func TestBridgeHelperProcess(t *testing.T) {
 	}
 	os.Exit(0)
 }
-

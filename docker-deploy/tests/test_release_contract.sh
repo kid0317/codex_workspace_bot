@@ -47,7 +47,7 @@ if grep -Eq '(system/runtime\.env|docker\.sock)' "$compose"; then
   exit 1
 fi
 
-codex_block="$(sed -n '/^  codex:/,/^  provider-proxy:/p' "$compose")"
+codex_block="$(sed -n '/^  codex:/,/^  bot:/p' "$compose")"
 if grep -q 'env_file:' <<<"$codex_block"; then
   echo "codex service must not load a secret env file" >&2
   exit 1
@@ -55,7 +55,8 @@ fi
 
 dockerfile="$deploy_dir/image/Dockerfile"
 grep -Eq '^USER [^0]' "$dockerfile"
-grep -Fq '@openai/codex@0.147.0' "$dockerfile"
+grep -Fq 'ARG CODEX_VERSION=0.147.0' "$dockerfile"
+grep -Fq '@openai/codex@${CODEX_VERSION}' "$dockerfile"
 if grep -Eq '^COPY[[:space:]]+\.[[:space:]]' "$dockerfile"; then
   echo "Dockerfile must use explicit COPY sources" >&2
   exit 1

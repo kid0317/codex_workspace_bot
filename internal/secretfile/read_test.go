@@ -39,4 +39,3 @@ func TestReadRejectsEmptySecret(t *testing.T) {
 		t.Fatal("empty secret accepted")
 	}
 }
-

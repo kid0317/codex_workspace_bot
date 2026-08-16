@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "version": "0.1.0",
+  "minimum_installer_version": "0.1.0",
+  "space_schema_version": 1,
+  "database_rollback": "restore_dump_if_incompatible",
+  "image": {
+    "repository": "crpi-0c1kby082wk3ovcx.cn-hangzhou.personal.cr.aliyuncs.com/codex-workspace/codex-workspace-bot",
+    "digest": "sha256:REPLACED_BY_PUBLISH"
+  }
+}
+
