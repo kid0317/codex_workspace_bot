@@ -1,0 +1,89 @@
+name: ${COMPOSE_PROJECT_NAME}
+
+services:
+  mysql:
+    image: ${MYSQL_IMAGE}
+    env_file: ./.secrets/mysql.env
+    volumes:
+      - mysql-data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -u$${MYSQL_USER} -p$${MYSQL_PASSWORD} --silent"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+    restart: unless-stopped
+    networks: [data]
+
+  provider-proxy:
+    image: ${BOT_IMAGE}
+    command: ["/usr/local/bin/provider-proxy"]
+    env_file: ./.secrets/provider.env
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "http://127.0.0.1:8090/healthz"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+    networks: [model]
+
+  codex:
+    image: ${BOT_IMAGE}
+    user: "${LOCAL_UID:-10001}:${LOCAL_GID:-10001}"
+    command: ["/usr/local/bin/codex-bridge"]
+    environment:
+      HOME: /space/system/home
+      CODEX_HOME: /space/system/codex-home
+      CODEX_BRIDGE_LISTEN: 0.0.0.0:7070
+      CODEX_BRIDGE_HEALTH_LISTEN: 0.0.0.0:7071
+      CODEX_PROXY_TOKEN: local-proxy-only
+    volumes:
+      - ./apps:/space/apps
+      - ./attachments:/space/attachments
+      - ./system/codex-home:/space/system/codex-home
+      - ./system/home:/space/system/home
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/codex-remote", "--health", "127.0.0.1:7071"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    stop_grace_period: 45s
+    restart: unless-stopped
+    networks: [control, model]
+
+  bot:
+    image: ${BOT_IMAGE}
+    user: "${LOCAL_UID:-10001}:${LOCAL_GID:-10001}"
+    command: ["/usr/local/bin/codex-workspace-bot-server", "--config", "/space/config/bot.yaml"]
+    env_file: ./.secrets/bot.env
+    environment:
+      HOME: /space/system/bot-home
+      CODEX_BRIDGE_ADDR: codex:7070
+      CODEX_CHILD_ENV_ALLOWLIST: PATH,HOME,LANG,LC_ALL,CODEX_BRIDGE_ADDR
+    volumes:
+      - ./apps:/space/apps:ro
+      - ./attachments:/space/attachments
+      - ./logs:/space/logs
+      - ./config/bot.yaml:/space/config/bot.yaml:ro
+      - ./system/bot-home:/space/system/bot-home
+    depends_on:
+      mysql:
+        condition: service_healthy
+      provider-proxy:
+        condition: service_healthy
+      codex:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:${BOT_HOST_PORT}:8080"
+    stop_grace_period: 45s
+    restart: unless-stopped
+    networks: [data, control]
+
+volumes:
+  mysql-data:
+    labels:
+      io.codex-workspace.space-id: ${SPACE_ID}
+
+networks:
+  data: {}
+  control: {}
+  model: {}

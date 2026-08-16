@@ -1,0 +1,10 @@
+model = "__MODEL__"
+model_provider = "local_proxy"
+model_reasoning_effort = "high"
+
+[model_providers.local_proxy]
+name = "Local credential-isolating proxy"
+base_url = "http://provider-proxy:8090"
+env_key = "CODEX_PROXY_TOKEN"
+wire_api = "responses"
+

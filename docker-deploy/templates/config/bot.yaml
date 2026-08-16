@@ -1,0 +1,64 @@
+server:
+  listen_addr: "0.0.0.0:8080"
+logging:
+  level: "info"
+  dir: "/space/logs"
+  retention_days: 30
+database:
+  host: "mysql"
+  port: 3306
+  name: "codex_workspace_bot"
+  user: "codex_workspace_bot"
+  password_env: "CODEX_WORKSPACE_BOT_DB_PASSWORD"
+  max_open_conns: 10
+  max_idle_conns: 5
+worker:
+  max_workers: 20
+  queue_depth: 64
+  idle_timeout_minutes: 30
+  in_process_timeout_minutes: 90
+  stop_grace_seconds: 40
+codex:
+  command: "/usr/local/bin/codex-remote"
+  rpc_timeout_seconds: 30
+  turn_timeout_seconds: 3000
+  idle_timeout_seconds: 3000
+  grace_seconds: 10
+streaming:
+  companion_segment_delay_ms: 400
+attachments:
+  root_dir: "/space/attachments"
+  max_file_bytes: 30000000
+  max_batch_bytes: 30000000
+  download_timeout_seconds: 30
+  retention_days: 7
+  max_retention_days: 30
+  resource_ref_keys:
+    - version: 1
+      key_env: "CODEX_WORKSPACE_BOT_ATTACHMENT_KEY_V1"
+feishu_actions:
+  enabled: true
+  default_doc_folder_token: ""
+  action_timeout_seconds: 20
+  result_keys:
+    - version: 1
+      key_env: "CODEX_WORKSPACE_BOT_ACTION_RESULT_KEY_V1"
+schedule:
+  enabled: false
+  tick_interval_ms: 1000
+  misfire_grace_seconds: 60
+  max_enabled_tasks_per_owner: 100
+  max_enabled_tasks_per_app: 1000
+  max_prompt_dispatch_per_tick: 20
+  payload_keys: []
+  owner_hmac_keys: []
+scripts:
+  enabled: false
+  shell_path: "/bin/sh"
+  timeout_seconds: 300
+  max_output_bytes: 24576
+  max_concurrent: 2
+observability:
+  langfuse:
+    enabled: false
+

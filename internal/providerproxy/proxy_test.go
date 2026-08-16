@@ -71,4 +71,3 @@ func TestProxyRejectsMissingConfiguration(t *testing.T) {
 		t.Fatal("New(Config{}) succeeded, want error")
 	}
 }
-
