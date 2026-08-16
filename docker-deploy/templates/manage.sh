@@ -20,6 +20,7 @@ target="$space_root/apps/$app_name/workspace"
 if test -e "$target"; then
   read -r -p "同名 Workspace 已存在，覆盖运行副本吗？[y/N] " answer
   [[ "$answer" =~ ^[Yy]$ ]] || exit 0
+  rm -rf -- "$target"
 fi
 mkdir -p "$target"
 cp -a "$source_dir/." "$target/"
@@ -45,4 +46,3 @@ compose run --rm --no-deps \
 cleanup
 trap - EXIT INT TERM
 echo "Workspace 已加入。运行 ./start.sh 即可启动全部服务。"
-

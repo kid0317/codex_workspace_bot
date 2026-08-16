@@ -75,6 +75,13 @@ fi
 grep -Fq 'https://dashscope.aliyuncs.com/compatible-mode/v1' "$deploy_dir/install.sh"
 grep -Fq 'https://dashscope.aliyuncs.com/compatible-mode/v1' "$deploy_dir/install.ps1"
 grep -Fq 'SetAccessRuleProtection($true, $false)' "$deploy_dir/install.ps1"
+grep -Fq 'docker login crpi-0c1kby082wk3ovcx.cn-hangzhou.personal.cr.aliyuncs.com' "$deploy_dir/install.sh"
+grep -Fq 'docker login crpi-0c1kby082wk3ovcx.cn-hangzhou.personal.cr.aliyuncs.com' "$deploy_dir/install.ps1"
+grep -Fq 'Get-ChildItem -LiteralPath $sourceDir -Force | Copy-Item' "$deploy_dir/templates/manage.ps1"
+if grep -Fq 'Copy-Item -LiteralPath (Join-Path $sourceDir "*")' "$deploy_dir/templates/manage.ps1"; then
+  echo "PowerShell must not use a wildcard with LiteralPath" >&2
+  exit 1
+fi
 if rg -q 'dashscope\.aliyuncs\.com/api/v2/apps' "$deploy_dir"; then
   echo "obsolete Bailian Base URL found" >&2
   exit 1
