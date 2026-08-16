@@ -22,7 +22,7 @@ echo "1. 阿里百炼 Responses"
 echo "2. DeepSeek Responses"
 read -r -p "请输入 1 或 2: " provider_choice
 case "$provider_choice" in
-  1) provider_kind="bailian-responses"; default_base="https://dashscope.aliyuncs.com/api/v2/apps"; default_model="qwen3-coder-plus";;
+  1) provider_kind="bailian-responses"; default_base="https://dashscope.aliyuncs.com/compatible-mode/v1"; default_model="qwen3.7-max";;
   2) provider_kind="deepseek-responses"; default_base="https://api.deepseek.com"; default_model="deepseek-chat";;
   *) echo "只能输入 1 或 2。" >&2; exit 2;;
 esac
@@ -128,4 +128,3 @@ if [[ ! "$start_now" =~ ^[Nn]$ ]]; then
 else
   echo "以后进入该文件夹，运行 ./start.sh 即可启动。"
 fi
-

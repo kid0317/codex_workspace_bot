@@ -30,7 +30,7 @@
 | 原则 | 说明 |
 |------|------|
 | **Codex 原生** | 只做 Codex 版本，不做 Claude 兼容，不做引擎抽象 |
-| **单进程** | 一个 App Server 进程服务所有 workspace |
+| **单 App Server** | 一个 App Server 进程服务所有 workspace；Docker 发行可跨容器，但不能变成多实例或共享 daemon |
 | **简化存储** | MySQL 持久化 + 内存队列，不用 Redis |
 | **按模式输出** | work 用 Notification 驱动流式卡片；companion 只在成功终态后以 final answer 多条文本送达 |
 | **编排层可观测** | Langfuse 直接接入 App Server Notification，不用 hooks |
@@ -158,11 +158,15 @@ codex-workspace-bot (Go 主进程)
   ├── Task Scheduler（MySQL task/run claim + Cron parser）
   ├── Cleanup Cron
   │
-  └── 子进程: codex app-server --stdio
-        └── 单进程服务所有 workspace
+  └── Native：子进程 codex app-server --stdio
+      Docker：子进程 codex-remote → byte-transparent bridge
+        └── 独立 Codex 容器中的唯一 codex app-server --stdio
+            └── 单进程服务所有 workspace
 ```
 
 **已裁决（2026-07-11）**：App Server 是本 bot 进程独占并管理的 stdio child。服务启动时创建 child，建立唯一 client 后必须先完成 `initialize` 才进入 ready；服务退出时关闭该 child。运行中 child 退出时，单一 supervisor 标记该 generation 的 in-progress turn 失败并立即创建一个 replacement child；replacement 的启动或 `initialize` 失败时进入 `app_server_unavailable`、停止这一次连续恢复，待人工修复后重启 bot。成功 initialize 的 replacement 会重置连续失败链，以后发生新的运行中退出仍可再次 replacement。绝不自动重放已中断消息。不得探测、复用、终止或重启其它进程的 App Server，也不使用 shared daemon/proxy 作为本产品默认路径。
+
+**Docker 发行补充裁决（2026-08-16）**：上面的“独占、唯一、由 Bot 生命周期管理”合同不变，但为了避免 `danger-full-access` Agent 继承或读取 Bot Secret，允许 Bot 的 stdio child 是最小环境的 `codex-remote`。它经隔离 control network 连接独立 Codex 容器中的 byte-transparent `codex-bridge`，由 bridge 独占拉起唯一 App Server。bridge 不理解 JSON-RPC、不持久化、不复用外部 daemon、拒绝第二个并发 client；Bot 的 `initialize`、generation、恢复和“不自动重放”语义全部保持不变。Provider API Key 另由只连接 model network 的固定上游 proxy 持有；它不是 App Server proxy，Codex 只看到无价值的占位 token。Bot、Codex、Provider proxy、MySQL 四个服务不得互相继承整套环境或挂载 `.secrets`。
 
 ---
 
@@ -257,6 +261,8 @@ cmd.Env = []string{
 ```
 
 该 child 的 stdin/stdout 只由本 bot 的唯一并发安全 client 持有：一个串行 writer、一个 reader 和按 JSON-RPC request ID 的 response correlation。启动不能仅以进程存活为准，必须以该连接的 `initialize` response 为 ready 证据；外部已有的 stdio App Server 没有可安全接管的 transport，不属于复用候选。
+
+Native 模式继续直接执行 `codex`；只有设置 `CODEX_CHILD_ENV_ALLOWLIST` 时才过滤 child 环境，以免破坏现有个人本机用法。Docker 发行必须设置白名单，并把 command 指向 `codex-remote`。Codex 容器不加载 Bot、飞书、数据库、HMAC 或 Provider Secret；release canary 必须从真实飞书消息触发 Shell 检查，证明环境、`/proc`、挂载和 Workspace 均无法读到这些 Secret。
 
 ### 5.3 指令加载
 
