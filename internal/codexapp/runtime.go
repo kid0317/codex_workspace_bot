@@ -6,7 +6,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
+	"strings"
 	"sync"
 	"time"
 
@@ -1224,6 +1226,7 @@ type processConn struct {
 
 func startProcess(command string) (io.ReadWriteCloser, error) {
 	cmd := exec.Command(command, "app-server", "--stdio")
+	cmd.Env = childEnvironment(os.Environ(), os.Getenv("CODEX_CHILD_ENV_ALLOWLIST"))
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return nil, err
@@ -1236,6 +1239,30 @@ func startProcess(command string) (io.ReadWriteCloser, error) {
 		return nil, err
 	}
 	return &processConn{stdin: stdin, stdout: stdout, cmd: cmd}, nil
+}
+
+func childEnvironment(ambient []string, allowlist string) []string {
+	if strings.TrimSpace(allowlist) == "" {
+		return ambient
+	}
+	allowed := make(map[string]struct{})
+	for _, name := range strings.Split(allowlist, ",") {
+		name = strings.TrimSpace(name)
+		if name != "" {
+			allowed[name] = struct{}{}
+		}
+	}
+	filtered := make([]string, 0, len(allowed))
+	for _, entry := range ambient {
+		name, _, ok := strings.Cut(entry, "=")
+		if !ok {
+			continue
+		}
+		if _, ok := allowed[name]; ok {
+			filtered = append(filtered, entry)
+		}
+	}
+	return filtered
 }
 func (p *processConn) Read(b []byte) (int, error)  { return p.stdout.Read(b) }
 func (p *processConn) Write(b []byte) (int, error) { return p.stdin.Write(b) }
