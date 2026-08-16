@@ -28,7 +28,7 @@ func main() {
 	secret := fs.String("secret", "", "Feishu app secret")
 	workspace := fs.String("workspace-dir", "", "absolute workspace directory")
 	model := fs.String("model", "gpt-5.6-terra", "model")
-	effort := fs.String("effort", "medium", "reasoning effort")
+	effort := fs.String("effort", "high", "reasoning effort")
 	_ = fs.Parse(args)
 	cfg, err := config.Load(*configPath)
 	if err != nil {

@@ -35,7 +35,7 @@ func TestLoadAppReturnsOnlyRequestedLegacyApp(t *testing.T) {
 	if app.Name != "health-assistant" || app.FeishuAppID != "cli_health" || app.WorkspaceDir != "/root/health" {
 		t.Fatalf("LoadApp() = %#v", app)
 	}
-	if app.WorkspaceMode != "work" || app.Model != "gpt-5.6-terra" || app.ReasoningEffort != "medium" {
+	if app.WorkspaceMode != "work" || app.Model != "gpt-5.6-terra" || app.ReasoningEffort != "high" {
 		t.Fatalf("unexpected migration defaults: %#v", app)
 	}
 }

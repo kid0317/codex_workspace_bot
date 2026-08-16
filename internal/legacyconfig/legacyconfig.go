@@ -9,7 +9,7 @@ import (
 
 const (
 	defaultModel           = "gpt-5.6-terra"
-	defaultReasoningEffort = "medium"
+	defaultReasoningEffort = "high"
 )
 
 // App is the subset of a legacy CC Workspace Bot application configuration
