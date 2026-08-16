@@ -23,4 +23,24 @@ if rg -n -- '--secret[[:space:]]+"?\$' "$SETUP" >/dev/null; then
 fi
 rg -q -- '--secret-env' "$SETUP" || fail "setup must pass the Feishu secret through appctl --secret-env"
 
+tmp_dir=$(mktemp -d)
+trap 'rm -rf "$tmp_dir"' EXIT
+mkdir -p "$tmp_dir/bin" "$tmp_dir/home"
+
+printf '#!/usr/bin/env bash\nprintf "Darwin\\n"\n' >"$tmp_dir/bin/uname"
+printf '#!/usr/bin/env bash\nprintf "14.6\\n"\n' >"$tmp_dir/bin/sw_vers"
+printf '#!/usr/bin/env bash\nprintf called >"${BREW_CALL_MARKER:?}"\nsleep 10\n' >"$tmp_dir/bin/brew"
+chmod +x "$tmp_dir/bin/uname" "$tmp_dir/bin/sw_vers" "$tmp_dir/bin/brew"
+
+set +e
+BREW_CALL_MARKER="$tmp_dir/brew-called" \
+  HOME="$tmp_dir/home" \
+  PATH="$tmp_dir/bin:$PATH" \
+  timeout 2 "$SETUP" --check >"$tmp_dir/check.out" 2>"$tmp_dir/check.err"
+check_status=$?
+set -e
+
+[[ $check_status -eq 0 ]] || fail "--check must finish without waiting for Homebrew (status $check_status)"
+[[ ! -e $tmp_dir/brew-called ]] || fail "--check must not execute Homebrew"
+
 printf 'ok: macOS native setup command and secret-handling contract\n'
