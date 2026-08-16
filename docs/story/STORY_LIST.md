@@ -15,3 +15,4 @@
 | S07 | Goal 持续执行与终态展示 | Delivered（2026-07-13；L3/L4 已验证） | S01–S05、现有命令实现、已登录本机 Codex、测试飞书 App | `/goal` 立即把目标作为首个 prompt 启动并持续展示，直到权威 Goal 终态 | [S07](S07-Goal持续执行与终态展示-设计.md) |
 | S08 | Langfuse 全链路 Trace 可观测性 | In Development（2026-07-14；新 Project、P0 read-back、真实 realtime 明文 Trace 已验证；scheduled/故障注入仍待验收） | S03、S06、现有自托管 Langfuse、新 Project/Key | 以既有每请求 Trace ID 和按 Chat 聚合的 Session 追踪 Agent loop、工具、进展、明文业务 payload 与 Turn/loop/session usage | [S08](S08-Langfuse全链路Trace可观测性-设计.md) |
 | S09 | 跨应用对话历史与 Langfuse 查询工具 | Draft / 待实现 | S01–S08、MySQL、当前自托管 Langfuse Project、测试飞书 App | 任意 App 可发现全部可查询 App/会话，并跨 App 读取完整 MySQL 对话历史和 Langfuse Trace | [S09](S09-跨应用对话历史与Langfuse查询工具-设计.md) |
+| S10 | 飞书富文本列表识别与输出投递容错 | Draft / 待实现 | S01、S02、S04、S05、真实飞书富文本样本、CardKit 故障注入 | 将飞书聊天框里的列表/富文本消息转换为 plain text，并让 CardKit/发送失败不再误中断正常 Codex 请求 | [S10](S10-飞书富文本列表消息识别-设计.md) |
