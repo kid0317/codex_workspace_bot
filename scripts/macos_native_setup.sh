@@ -56,6 +56,11 @@ canonical_dir() {
   (cd -- "$path" && pwd -P)
 }
 
+mysql84_installed_locally() {
+  [[ -x /opt/homebrew/opt/mysql@8.4/bin/mysql ]] ||
+    [[ -x /usr/local/opt/mysql@8.4/bin/mysql ]]
+}
+
 command_summary() {
   local failed=0
   printf 'macOS: %s\n' "$(sw_vers -productVersion 2>/dev/null || true)"
@@ -67,10 +72,12 @@ command_summary() {
       failed=1
     fi
   done
-  if command -v brew >/dev/null 2>&1 && brew list --versions mysql@8.4 >/dev/null 2>&1; then
+  # Keep --check fully local and bounded. Homebrew may auto-update or wait on
+  # network state even for `brew list`, so only inspect its standard symlinks.
+  if mysql84_installed_locally; then
     printf '  [OK] mysql@8.4\n'
   else
-    printf '  [缺少] mysql@8.4\n'
+    printf '  [未发现] mysql@8.4（初始化时再由 Homebrew 确认）\n'
     failed=1
   fi
   return "$failed"
