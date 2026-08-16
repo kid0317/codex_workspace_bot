@@ -17,9 +17,13 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath -ldfl
     && CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath -ldflags="-s -w" -o /out/secure-appctl ./cmd/secure-appctl \
     && CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath -ldflags="-s -w" -o /out/provider-proxy ./cmd/provider-proxy
 
-FROM node:22-bookworm-slim
-
+FROM --platform=$TARGETPLATFORM node:22-bookworm-slim AS codex
 ARG CODEX_VERSION=0.147.0
+RUN npm install --global "@openai/codex@${CODEX_VERSION}" \
+    && npm cache clean --force
+
+FROM debian:bookworm-slim
+
 ARG VERSION=dev
 ARG VCS_REF=unknown
 LABEL org.opencontainers.image.title="Codex Workspace Bot" \
@@ -29,11 +33,14 @@ LABEL org.opencontainers.image.title="Codex Workspace Bot" \
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends bash ca-certificates curl git jq openssh-client ripgrep tini unzip \
-    && npm install --global "@openai/codex@${CODEX_VERSION}" \
-    && npm cache clean --force \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=codex /usr/local/lib/node_modules/@openai/codex/node_modules/@openai/ /opt/codex-packages/
+RUN codex_binary="$(find /opt/codex-packages -type f -path '*/bin/codex' | head -n 1)" \
+    && test -n "$codex_binary" \
+    && ln -s "$codex_binary" /usr/local/bin/codex \
     && groupadd --gid 10001 app \
     && useradd --uid 10001 --gid 10001 --create-home --shell /bin/bash app \
-    && rm -rf /var/lib/apt/lists/*
+    && codex --version
 
 WORKDIR /opt/codex-workspace-bot
 COPY --from=builder /out/server /usr/local/bin/codex-workspace-bot-server
