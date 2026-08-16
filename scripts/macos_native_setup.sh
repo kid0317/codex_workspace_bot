@@ -15,7 +15,8 @@ Usage:
 
 The interactive setup checks Git, Go, Codex and Homebrew MySQL 8.4, initializes
 the local database, writes private runtime settings to .env, and registers one
-Feishu App plus its Workspace through appctl. It does not use Docker or Ubuntu.
+Feishu App plus its Workspace through appctl. It defaults Homebrew and Go to
+mainland-China download mirrors and does not use Docker or Ubuntu.
 EOF
 }
 
@@ -26,6 +27,17 @@ fail() {
 
 require_macos() {
   [[ $(uname -s) == Darwin ]] || fail "this setup only supports macOS"
+}
+
+configure_mainland_network_defaults() {
+  # Homebrew may otherwise run `brew update` before install and wait on GitHub.
+  # Keep user-supplied mirror choices, but make the zero-config path work on a
+  # mainland-China network.
+  export HOMEBREW_NO_AUTO_UPDATE=1
+  export HOMEBREW_NO_ENV_HINTS=1
+  export HOMEBREW_API_DOMAIN="${HOMEBREW_API_DOMAIN:-https://mirrors.tuna.tsinghua.edu.cn/homebrew-bottles/api}"
+  export HOMEBREW_BOTTLE_DOMAIN="${HOMEBREW_BOTTLE_DOMAIN:-https://mirrors.tuna.tsinghua.edu.cn/homebrew-bottles}"
+  export GOPROXY="${GOPROXY:-https://goproxy.cn,direct}"
 }
 
 ask_yes_no() {
@@ -293,15 +305,12 @@ case "${1:-}" in
 esac
 
 require_macos
+configure_mainland_network_defaults
 printf '\n=== Codex Workspace Bot：macOS 原生初始化 ===\n'
+printf '已启用国内网络默认配置：Homebrew 清华镜像（跳过自动更新），Go goproxy.cn。\n'
 ensure_dependencies
 mysql_paths
 start_mysql
-
-if ask_yes_no "中国大陆网络是否需要 Go 依赖加速？" n; then
-  go env -w GOPROXY=https://goproxy.cn,direct
-  printf '已设置 GOPROXY=https://goproxy.cn,direct\n'
-fi
 
 [[ -f $CONFIG_FILE ]] || cp "$CONFIG_TEMPLATE" "$CONFIG_FILE"
 chmod 0600 "$CONFIG_FILE"
