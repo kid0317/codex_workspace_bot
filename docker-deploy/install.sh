@@ -2,7 +2,7 @@
 set -euo pipefail
 
 deploy_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-image_default="crpi-0c1kby082wk3ovcx.cn-hangzhou.personal.cr.aliyuncs.com/codex-workspace/codex-workspace-bot:0.1.0"
+image_default="crpi-0c1kby082wk3ovcx.cn-hangzhou.personal.cr.aliyuncs.com/codex-workspace/codex-workspace-bot@sha256:5269d0fdfb0c5c061e20cfa402d67fe4910e38c9d5b2fc43952eb912fe2b4e1e"
 
 command -v docker >/dev/null 2>&1 || { echo "没有找到 Docker。请先安装并打开 Docker Desktop。" >&2; exit 1; }
 docker info >/dev/null 2>&1 || { echo "Docker 没有启动。请先打开 Docker Desktop，等鲸鱼图标稳定后再试。" >&2; exit 1; }
@@ -98,7 +98,7 @@ cat > "$staging/space.lock.json" <<EOF
   "schema_version": 1,
   "space_id": "$space_id",
   "version": "0.1.0",
-  "image_digest": "",
+  "image_digest": "sha256:5269d0fdfb0c5c061e20cfa402d67fe4910e38c9d5b2fc43952eb912fe2b4e1e",
   "provider_kind": "$provider_kind"
 }
 EOF
@@ -114,10 +114,9 @@ chmod +x "$staging/"*.sh
 
 (cd "$staging" && docker compose config --quiet)
 if ! (cd "$staging" && docker compose pull); then
-  echo "镜像下载失败。阿里云 ACR 新个人版即使仓库为 Public 也要求登录。" >&2
-  echo "请先运行：docker login crpi-0c1kby082wk3ovcx.cn-hangzhou.personal.cr.aliyuncs.com" >&2
-  echo "你还必须拥有这个仓库的有效拉取权限；不要向学员共享维护者密码。" >&2
-  echo "登录成功后重新运行安装器；安装器不会读取或保存仓库密码。" >&2
+  echo "镜像下载失败。这个 Public 仓库已经通过匿名拉取验证，不需要维护者密码。" >&2
+  echo "请先确认 Docker Desktop 正在运行，并检查网络后重试。" >&2
+  echo "ACR 个人版使用共享带宽，高峰期可能限速；请稍后重试，不要使用或索要维护者凭据。" >&2
   exit 1
 fi
 cp -R "$staging/." "$install_path/"
