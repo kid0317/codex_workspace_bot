@@ -14,8 +14,13 @@ if ([string]::IsNullOrWhiteSpace($model)) { $model = $defaultModel }
 if ($model -notmatch '^[A-Za-z0-9._:/-]+$') { throw "模型名称格式不对。" }
 
 $target = Join-Path $PSScriptRoot "apps\$appName\workspace"
+if (Test-Path -LiteralPath $target) {
+    $answer = Read-Host "同名 Workspace 已存在，覆盖运行副本吗？[y/N]"
+    if ($answer -notmatch '^[Yy]$') { return }
+    Remove-Item -LiteralPath $target -Recurse -Force
+}
 New-Item -ItemType Directory -Force -Path $target | Out-Null
-Copy-Item -LiteralPath (Join-Path $sourceDir "*") -Destination $target -Recurse -Force
+Get-ChildItem -LiteralPath $sourceDir -Force | Copy-Item -Destination $target -Recurse -Force
 
 $secretPath = Join-Path $PSScriptRoot ".secrets\.bootstrap-$appName-$PID"
 $bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secureSecret)
@@ -23,6 +28,12 @@ try {
     $plain = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr)
     if ([string]::IsNullOrEmpty($plain) -or $plain.Contains("`n") -or $plain.Contains("`r")) { throw "Secret 不能为空或包含换行。" }
     [IO.File]::WriteAllText($secretPath, $plain + "`n", [Text.UTF8Encoding]::new($false))
+    $identity = [Security.Principal.WindowsIdentity]::GetCurrent().User
+    $acl = New-Object Security.AccessControl.FileSecurity
+    $acl.SetOwner($identity)
+    $acl.SetAccessRuleProtection($true, $false)
+    $acl.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule($identity, "FullControl", "Allow")))
+    Set-Acl -LiteralPath $secretPath -AclObject $acl
 } finally {
     if ($bstr -ne [IntPtr]::Zero) { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr) }
     $plain = $null
@@ -35,4 +46,3 @@ try {
     Remove-Item -LiteralPath $secretPath -Force -ErrorAction SilentlyContinue
 }
 Write-Host "Workspace 已加入。运行 .\start.ps1 即可启动全部服务。"
-

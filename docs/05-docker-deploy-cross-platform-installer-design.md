@@ -854,9 +854,9 @@ crpi-0c1kby082wk3ovcx.cn-hangzhou.personal.cr.aliyuncs.com/
   codex-workspace/codex-workspace-bot
 ```
 
-仓库类型已设为 `PUBLIC`，但阿里云当前的新个人版 `crpi-` 实例明确**不支持匿名拉取**，Public 只代表仓库可见性，用户安装前仍需完成一次 `docker login`。ACR 个人版只用于课程和个人体验，不宣称生产 SLA。Compose 固定 release manifest 中的 digest，不依赖 `latest`。
+仓库类型已设为 `PUBLIC`，但阿里云当前的新个人版 `crpi-` 实例明确**不支持匿名拉取**，Public 只代表仓库可见性。安装者不仅需要 `docker login`，还需要仓库拉取权限；不能把维护者 Registry 密码发给学员。ACR 个人版因此只用于开发和内部验证，不宣称生产 SLA。Compose 固定 release manifest 中的 digest，不依赖 `latest`。
 
-这意味着“国内可直接免登录下载”目前没有在个人版 ACR 上实现。首版采取“公开仓库 + 登录后按 digest 拉取”；若课程必须做到真正免登录，需要另行选择支持匿名拉取的公开制品渠道或开通合适的企业版实例。这属于发行渠道决策，不能靠安装脚本绕过。
+这意味着“面向普通学员公开下载”目前没有在个人版 ACR 上实现。内部验证可采取“Public 仓库 + 获得授权后按 digest 拉取”；正式课程需要另行选择支持匿名拉取的公开制品渠道或开通合适的企业版实例。这属于发行渠道决策，不能靠安装脚本绕过，更不能靠共享维护者密码解决。
 
 维护者侧使用阿里云 API 临时 Docker 凭据、临时 `DOCKER_CONFIG` 和 `docker login --password-stdin`；退出时清理临时目录。AK/SK、registry password、Docker auth JSON 都不进入 argv、日志、Git 或发行包。由于临时令牌有效期有限，`publish.sh` 分别发布 amd64、arm64，再合成总 manifest；每一步之前都可以刷新登录，不在一个长任务中赌令牌寿命。
 

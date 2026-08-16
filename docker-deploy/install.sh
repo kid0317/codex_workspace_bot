@@ -112,7 +112,14 @@ EOF
 chmod 600 "$staging/.env" "$staging/.secrets/"*.env "$staging/space.lock.json" "$staging/system/codex-home/config.toml"
 chmod +x "$staging/"*.sh
 
-(cd "$staging" && docker compose config --quiet && docker compose pull)
+(cd "$staging" && docker compose config --quiet)
+if ! (cd "$staging" && docker compose pull); then
+  echo "镜像下载失败。阿里云 ACR 新个人版即使仓库为 Public 也要求登录。" >&2
+  echo "请先运行：docker login crpi-0c1kby082wk3ovcx.cn-hangzhou.personal.cr.aliyuncs.com" >&2
+  echo "你还必须拥有这个仓库的有效拉取权限；不要向学员共享维护者密码。" >&2
+  echo "登录成功后重新运行安装器；安装器不会读取或保存仓库密码。" >&2
+  exit 1
+fi
 cp -R "$staging/." "$install_path/"
 cleanup
 trap - EXIT INT TERM

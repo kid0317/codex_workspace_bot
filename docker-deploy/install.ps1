@@ -92,7 +92,9 @@ try {
     & docker compose --project-directory $staging -f (Join-Path $staging "compose.yaml") config --quiet
     if ($LASTEXITCODE -ne 0) { throw "Compose 配置校验失败。" }
     & docker compose --project-directory $staging -f (Join-Path $staging "compose.yaml") pull
-    if ($LASTEXITCODE -ne 0) { throw "镜像下载失败。" }
+    if ($LASTEXITCODE -ne 0) {
+        throw "镜像下载失败。阿里云 ACR 新个人版即使仓库为 Public 也要求登录，而且账号必须有仓库拉取权限。请勿向学员共享维护者密码。先运行 docker login crpi-0c1kby082wk3ovcx.cn-hangzhou.personal.cr.aliyuncs.com，登录成功后重试；安装器不会读取或保存仓库密码。"
+    }
     Copy-Item -Path (Join-Path $staging "*") -Destination $installPath -Recurse -Force
     Get-ChildItem -LiteralPath $staging -Force | Where-Object { $_.Name -like ".*" } | ForEach-Object { Copy-Item -LiteralPath $_.FullName -Destination $installPath -Recurse -Force }
 } finally {
