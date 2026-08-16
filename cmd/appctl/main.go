@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 
 	"github.com/kid0317/codex-workspace-bot/internal/appimport"
 	"github.com/kid0317/codex-workspace-bot/internal/config"
@@ -26,6 +27,7 @@ func main() {
 	enabled := fs.Bool("enabled", true, "enabled")
 	appID := fs.String("app-id", "", "Feishu app id")
 	secret := fs.String("secret", "", "Feishu app secret")
+	secretEnv := fs.String("secret-env", "", "environment variable containing the Feishu app secret")
 	workspace := fs.String("workspace-dir", "", "absolute workspace directory")
 	model := fs.String("model", "gpt-5.6-terra", "model")
 	effort := fs.String("effort", "medium", "reasoning effort")
@@ -80,14 +82,18 @@ func main() {
 		}
 		fmt.Println("deleted", *name)
 	case "create", "update":
-		if *name == "" || *appID == "" || *secret == "" || *workspace == "" {
+		resolvedSecret, secretErr := resolveAppSecret(*secret, *secretEnv, os.LookupEnv)
+		if secretErr != nil {
+			fail(secretErr)
+		}
+		if *name == "" || *appID == "" || resolvedSecret == "" || *workspace == "" {
 			usage()
 		}
 		info, statErr := os.Stat(*workspace)
 		if statErr != nil || !info.IsDir() {
 			fail(fmt.Errorf("workspace-dir must be an existing directory"))
 		}
-		if err := store.UpsertApp(context.Background(), storage.App{Name: *name, FeishuAppID: *appID, FeishuAppSecret: *secret, WorkspaceDir: *workspace, WorkspaceMode: "work", Model: *model, ReasoningEffort: *effort, Enabled: *enabled}); err != nil {
+		if err := store.UpsertApp(context.Background(), storage.App{Name: *name, FeishuAppID: *appID, FeishuAppSecret: resolvedSecret, WorkspaceDir: *workspace, WorkspaceMode: "work", Model: *model, ReasoningEffort: *effort, Enabled: *enabled}); err != nil {
 			fail(err)
 		}
 		fmt.Println("updated", *name)
@@ -96,7 +102,29 @@ func main() {
 	}
 }
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: appctl create|update|import-legacy-app|list|enable|disable|delete --config config.yaml [--name NAME]")
+	fmt.Fprintln(os.Stderr, "usage: appctl create|update|import-legacy-app|list|enable|disable|delete --config config.yaml [--name NAME] [--secret-env ENV_NAME]")
 	os.Exit(2)
 }
 func fail(err error) { fmt.Fprintln(os.Stderr, "appctl:", err); os.Exit(1) }
+
+var environmentNamePattern = regexp.MustCompile("^[A-Za-z_][A-Za-z0-9_]*$")
+
+func resolveAppSecret(direct, environmentName string, lookup func(string) (string, bool)) (string, error) {
+	if direct != "" && environmentName != "" {
+		return "", fmt.Errorf("provide only one of --secret or --secret-env")
+	}
+	if environmentName == "" {
+		if direct == "" {
+			return "", fmt.Errorf("provide --secret-env (recommended) or --secret")
+		}
+		return direct, nil
+	}
+	if !environmentNamePattern.MatchString(environmentName) {
+		return "", fmt.Errorf("invalid --secret-env name")
+	}
+	secret, ok := lookup(environmentName)
+	if !ok || secret == "" {
+		return "", fmt.Errorf("environment variable %s is not set or is empty", environmentName)
+	}
+	return secret, nil
+}

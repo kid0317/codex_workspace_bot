@@ -32,8 +32,8 @@ Codex Workspace Bot 是一个本机自用的飞书 Bot 编排器：用户在飞�
 |---|---|---|
 | Go 1.23+ | 必需 | 构建 `cmd/server` 和 `cmd/appctl`。 |
 | Codex CLI | 必需 | 需要先在本机执行 `codex login`。 |
-| Docker / Docker Compose | 必需 | 本仓库提供 MySQL compose 服务。 |
-| MySQL 8.4 | 必需 | 默认由 `docker-compose.yml` 启动。 |
+| Docker / Docker Compose | Linux 默认路径需要 | 用于启动仓库提供的 MySQL compose；macOS 原生路径不需要。 |
+| MySQL 8.4 | 必需 | Linux 可由 Compose 启动；macOS 可由 Homebrew 原生启动。 |
 | 飞书自建应用 | 必需 | 需要长连接、事件订阅和消息发送权限。 |
 | Langfuse | 可选 | 只在启用 `observability.langfuse.enabled` 时需要。 |
 | Redis | 不需要 | 当前默认架构是 MySQL + 进程内队列。 |
@@ -98,6 +98,30 @@ go run ./cmd/appctl list --config ./config.yaml
 
 ## Quick Start
 
+### macOS 原生交互式安装
+
+macOS 用户不需要 Ubuntu、Multipass 或 Docker。先完成 Codex 登录和飞书应用准备，再执行：
+
+```bash
+./scripts/macos_native_setup.sh --check
+./scripts/macos_native_setup.sh
+```
+
+初始化器会检查或安装 Homebrew Go/MySQL、初始化本机数据库、生成私有 `.env`、提示输入飞书凭据和 Workspace 路径，并通过 `appctl` 登记应用。飞书 App Secret 通过 `--secret-env` 传给 `appctl`，不会出现在命令历史或进程参数中。
+
+后续使用原生控制器：
+
+```bash
+./macos_bot_controller.sh status
+./macos_bot_controller.sh restart
+./macos_bot_controller.sh logs
+./macos_bot_controller.sh stop
+```
+
+控制器使用当前登录用户的 `launchd`，凭据仍只保存在本机 `.env`。
+
+### Linux / 手工安装
+
 1. 登录 Codex CLI：
 
    ```bash
@@ -122,15 +146,20 @@ go run ./cmd/appctl list --config ./config.yaml
 4. 创建一个 Bot App 配置：
 
    ```bash
+   printf 'Feishu App Secret（输入时不显示）：'
+   read -r -s AIPM_FEISHU_APP_SECRET
+   printf '\n'
+   export AIPM_FEISHU_APP_SECRET
    go run ./cmd/appctl create \
      --config ./config.yaml \
      --name my-bot \
      --app-id cli_xxx \
-     --secret replace-with-feishu-app-secret \
+     --secret-env AIPM_FEISHU_APP_SECRET \
      --workspace-dir /absolute/path/to/workspace \
      --model gpt-5 \
      --effort medium \
      --enabled=true
+   unset AIPM_FEISHU_APP_SECRET
    ```
 
    也可以从旧本机配置导入：
@@ -162,7 +191,7 @@ go run ./cmd/appctl list --config ./config.yaml
 
 ## 运行控制
 
-本项目的本地服务必须使用仓库根目录的 `bot_controller.sh` 管理：
+Linux 本地服务使用仓库根目录的 `bot_controller.sh` 管理：
 
 ```bash
 ./bot_controller.sh build
@@ -171,7 +200,16 @@ go run ./cmd/appctl list --config ./config.yaml
 ./bot_controller.sh stop
 ```
 
-不要用 `nohup`、shell 后台命令或直接执行 `runtime/codex_workspace_bot` 替代它。控制脚本会构建到 `runtime/codex_workspace_bot`，用 user systemd 启动服务，并在停止时给 Bot 和它管理的 App Server 子进程发送优雅终止。
+macOS 使用对应的原生控制器：
+
+```bash
+./macos_bot_controller.sh build
+./macos_bot_controller.sh start
+./macos_bot_controller.sh restart
+./macos_bot_controller.sh stop
+```
+
+不要用 `nohup`、shell 后台命令或直接执行 `runtime/codex_workspace_bot` 替代控制器。Linux 控制器使用 user systemd，macOS 控制器使用当前登录用户的 launchd；两者都会构建到 `runtime/codex_workspace_bot` 并负责服务生命周期。
 
 ## App 管理
 
@@ -179,7 +217,9 @@ go run ./cmd/appctl list --config ./config.yaml
 go run ./cmd/appctl list --config ./config.yaml
 go run ./cmd/appctl enable --config ./config.yaml --name my-bot
 go run ./cmd/appctl disable --config ./config.yaml --name my-bot
-go run ./cmd/appctl update --config ./config.yaml --name my-bot --app-id cli_xxx --secret replace-with-secret --workspace-dir /abs/ws --model gpt-5 --effort medium
+printf 'Feishu App Secret（输入时不显示）：'; read -r -s AIPM_FEISHU_APP_SECRET; printf '\n'; export AIPM_FEISHU_APP_SECRET
+go run ./cmd/appctl update --config ./config.yaml --name my-bot --app-id cli_xxx --secret-env AIPM_FEISHU_APP_SECRET --workspace-dir /abs/ws --model gpt-5 --effort medium
+unset AIPM_FEISHU_APP_SECRET
 go run ./cmd/appctl delete --config ./config.yaml --name my-bot
 ```
 
@@ -245,6 +285,8 @@ go test -race ./internal/worker ./internal/codexapp ./internal/schedule -count=1
 
 ```bash
 bash scripts/test_bot_controller.sh
+bash scripts/test_macos_native_setup.sh
+bash scripts/test_macos_bot_controller.sh
 ```
 
 真实飞书、真实 Codex App Server 和 Langfuse read-back 属于外部集成验收，需要用本机凭据单独执行并记录证据。
