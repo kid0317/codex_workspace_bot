@@ -1,6 +1,6 @@
 $ErrorActionPreference = "Stop"
 $deployDir = Split-Path -Parent $MyInvocation.MyCommand.Path
-$imageDefault = "crpi-0c1kby082wk3ovcx.cn-hangzhou.personal.cr.aliyuncs.com/codex-workspace/codex-workspace-bot:0.1.0"
+$imageDefault = "crpi-0c1kby082wk3ovcx.cn-hangzhou.personal.cr.aliyuncs.com/codex-workspace/codex-workspace-bot@sha256:5269d0fdfb0c5c061e20cfa402d67fe4910e38c9d5b2fc43952eb912fe2b4e1e"
 
 if (-not (Get-Command docker -ErrorAction SilentlyContinue)) { throw "没有找到 Docker。请先安装并打开 Docker Desktop。" }
 docker info *> $null
@@ -82,7 +82,7 @@ try {
     [IO.File]::WriteAllLines((Join-Path $staging ".env"), @("COMPOSE_PROJECT_NAME=$projectName", "SPACE_ID=$spaceId", "BOT_IMAGE=$imageDefault", "MYSQL_IMAGE=mysql:8.4", "BOT_HOST_PORT=$botPort", "LOCAL_UID=10001", "LOCAL_GID=10001", "DEFAULT_MODEL=$model", "PROVIDER_KIND=$providerKind"), [Text.UTF8Encoding]::new($false))
     $codexConfig = Get-Content (Join-Path $staging "system\codex-home\config.toml") -Raw
     [IO.File]::WriteAllText((Join-Path $staging "system\codex-home\config.toml"), $codexConfig.Replace("__MODEL__", $model), [Text.UTF8Encoding]::new($false))
-    $spaceLock = [ordered]@{ schema_version = 1; space_id = $spaceId; version = "0.1.0"; image_digest = ""; provider_kind = $providerKind }
+    $spaceLock = [ordered]@{ schema_version = 1; space_id = $spaceId; version = "0.1.0"; image_digest = "sha256:5269d0fdfb0c5c061e20cfa402d67fe4910e38c9d5b2fc43952eb912fe2b4e1e"; provider_kind = $providerKind }
     $spaceLock | ConvertTo-Json | Set-Content -Encoding utf8 (Join-Path $staging "space.lock.json")
     [IO.File]::WriteAllLines((Join-Path $staging ".gitignore"), @(".env", ".secrets/", "system/backups/", "logs/", "attachments/"), [Text.UTF8Encoding]::new($false))
     foreach ($protectedFile in @(".env", ".secrets\provider.env", ".secrets\mysql.env", ".secrets\bot.env", "space.lock.json", "system\codex-home\config.toml")) {
@@ -93,7 +93,7 @@ try {
     if ($LASTEXITCODE -ne 0) { throw "Compose 配置校验失败。" }
     & docker compose --project-directory $staging -f (Join-Path $staging "compose.yaml") pull
     if ($LASTEXITCODE -ne 0) {
-        throw "镜像下载失败。阿里云 ACR 新个人版即使仓库为 Public 也要求登录，而且账号必须有仓库拉取权限。请勿向学员共享维护者密码。先运行 docker login crpi-0c1kby082wk3ovcx.cn-hangzhou.personal.cr.aliyuncs.com，登录成功后重试；安装器不会读取或保存仓库密码。"
+        throw "镜像下载失败。这个 Public 仓库已经通过匿名拉取验证，不需要维护者密码。请确认 Docker Desktop 正在运行并检查网络后重试。ACR 个人版使用共享带宽，高峰期可能限速；请稍后重试，不要使用或索要维护者凭据。"
     }
     Copy-Item -Path (Join-Path $staging "*") -Destination $installPath -Recurse -Force
     Get-ChildItem -LiteralPath $staging -Force | Where-Object { $_.Name -like ".*" } | ForEach-Object { Copy-Item -LiteralPath $_.FullName -Destination $installPath -Recurse -Force }

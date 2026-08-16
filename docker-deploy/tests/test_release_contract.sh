@@ -75,8 +75,19 @@ fi
 grep -Fq 'https://dashscope.aliyuncs.com/compatible-mode/v1' "$deploy_dir/install.sh"
 grep -Fq 'https://dashscope.aliyuncs.com/compatible-mode/v1' "$deploy_dir/install.ps1"
 grep -Fq 'SetAccessRuleProtection($true, $false)' "$deploy_dir/install.ps1"
-grep -Fq 'docker login crpi-0c1kby082wk3ovcx.cn-hangzhou.personal.cr.aliyuncs.com' "$deploy_dir/install.sh"
-grep -Fq 'docker login crpi-0c1kby082wk3ovcx.cn-hangzhou.personal.cr.aliyuncs.com' "$deploy_dir/install.ps1"
+grep -Fq '已经通过匿名拉取验证' "$deploy_dir/install.sh"
+grep -Fq '已经通过匿名拉取验证' "$deploy_dir/install.ps1"
+if rg -q '(Public.*要求登录|不支持匿名拉取)' "$deploy_dir/install.sh" "$deploy_dir/install.ps1"; then
+  echo "installer contains a disproven ACR authentication claim" >&2
+  exit 1
+fi
+release_repository="$(jq -er '.image.repository' "$deploy_dir/release/release-manifest.json")"
+release_digest="$(jq -er '.image.digest | select(test("^sha256:[0-9a-f]{64}$"))' "$deploy_dir/release/release-manifest.json")"
+release_image="${release_repository}@${release_digest}"
+grep -Fq "image_default=\"${release_image}\"" "$deploy_dir/install.sh"
+grep -Fq "\$imageDefault = \"${release_image}\"" "$deploy_dir/install.ps1"
+grep -Fq "\"image_digest\": \"${release_digest}\"" "$deploy_dir/install.sh"
+grep -Fq "image_digest = \"${release_digest}\"" "$deploy_dir/install.ps1"
 grep -Fq 'Get-ChildItem -LiteralPath $sourceDir -Force | Copy-Item' "$deploy_dir/templates/manage.ps1"
 if grep -Fq 'Copy-Item -LiteralPath (Join-Path $sourceDir "*")' "$deploy_dir/templates/manage.ps1"; then
   echo "PowerShell must not use a wildcard with LiteralPath" >&2

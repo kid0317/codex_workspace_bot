@@ -854,9 +854,9 @@ crpi-0c1kby082wk3ovcx.cn-hangzhou.personal.cr.aliyuncs.com/
   codex-workspace/codex-workspace-bot
 ```
 
-仓库类型已设为 `PUBLIC`，但阿里云当前的新个人版 `crpi-` 实例明确**不支持匿名拉取**，Public 只代表仓库可见性。安装者不仅需要 `docker login`，还需要仓库拉取权限；不能把维护者 Registry 密码发给学员。ACR 个人版因此只用于开发和内部验证，不宣称生产 SLA。Compose 固定 release manifest 中的 digest，不依赖 `latest`。
+仓库类型已设为 `PUBLIC`。2026-08-17 使用空认证文件和纯 HTTP 无 Basic 凭据流程实测：匿名 pull token、总 manifest 与真实 ARM 大层均返回 200，blob 长度与 digest header 和发布清单一致；随后用全新空 `DOCKER_CONFIG` 按总 digest 执行 `docker pull` 成功。因此该具体仓库当前支持匿名拉取，不需要向学员分发 Registry 密码。Compose 固定 release manifest 中的 digest，不依赖 `latest`。
 
-这意味着“面向普通学员公开下载”目前没有在个人版 ACR 上实现。内部验证可采取“Public 仓库 + 获得授权后按 digest 拉取”；正式课程需要另行选择支持匿名拉取的公开制品渠道或开通合适的企业版实例。这属于发行渠道决策，不能靠安装脚本绕过，更不能靠共享维护者密码解决。
+阿里云官方页面对新个人版实例强调的是独立域名、共享带宽、无固定出口带宽保障和高峰期限流，并没有写“Public 仓库不支持匿名拉取”。正式课程可以使用当前匿名地址，但要把并发控制、失败重试和未来策略变化后的备用渠道写入运行手册；ACR 个人版不宣称生产 SLA。
 
 维护者侧使用阿里云 API 临时 Docker 凭据、临时 `DOCKER_CONFIG` 和 `docker login --password-stdin`；退出时清理临时目录。AK/SK、registry password、Docker auth JSON 都不进入 argv、日志、Git 或发行包。由于临时令牌有效期有限，`publish.sh` 分别发布 amd64、arm64，再合成总 manifest；每一步之前都可以刷新登录，不在一个长任务中赌令牌寿命。
 
@@ -880,7 +880,7 @@ crpi-0c1kby082wk3ovcx.cn-hangzhou.personal.cr.aliyuncs.com/
 - 以非 root 用户运行，镜像不包含编译器、源码、测试数据或 Docker CLI。
 - release manifest、checksums、SBOM 与 provenance 随发行版保存；镜像 digest 进入 lock。
 - amd64/arm64 冒烟测试。
-- 中国大陆网络环境登录后按 digest 拉取测试；匿名拉取作为渠道迁移后的目标，不列为 ACR 个人版 Gate。
+- 使用无 Docker 登录状态按 digest 拉取，并验证 manifest 与真实 blob；课程集中安装时将并发控制在官方建议范围内。
 
 ## 17. 测试设计
 
@@ -967,7 +967,7 @@ crpi-0c1kby082wk3ovcx.cn-hangzhou.personal.cr.aliyuncs.com/
 ### Phase 6：ACR 与教学发行
 
 - LICENSE/Notice。
-- 登录可拉取的多架构公开仓库、Starter ZIP 和校验值；另行决策免登录发行渠道。
+- 可匿名拉取的多架构公开仓库、Starter ZIP 和校验值；为个人版共享带宽准备分批安装和备用渠道。
 - 面向小白的 Windows/macOS 教程与全流程录像。
 
 ## 19. 最终验收标准
@@ -986,7 +986,7 @@ crpi-0c1kby082wk3ovcx.cn-hangzhou.personal.cr.aliyuncs.com/
 12. 安装中断、拉取失败和 Provider 配错均能恢复，不产生伪成功。
 13. AIPM 助手 Dev/Use 导出包各通过一次真实导入与飞书消息 E2E。
 14. 普通停止不删除 named volume；删除数据必须是独立、明确确认的动作。
-15. ACR 个人版仓库经登录后可以从国内网络按 digest 拉取，且 manifest 同时含 amd64/arm64；若要求匿名拉取，必须先迁移发行渠道。
+15. ACR 个人版仓库可以在无登录状态按 digest 拉取，且 manifest 同时含 amd64/arm64；匿名 token、manifest 和真实 blob 均通过验证。
 16. Agent 的环境、文件系统和 `/proc` 看不到 Bot、Provider、数据库、HMAC 或其他 App Secret。
 17. 更新有已验证 manifest、DB 备份、观察窗和失败回滚；卸载默认保留数据，purge 必须二次确认。
 
@@ -1006,13 +1006,21 @@ crpi-0c1kby082wk3ovcx.cn-hangzhou.personal.cr.aliyuncs.com/
 | 后续直接用启动脚本 | start/stop/status/logs | 已设计 |
 | 后续维护与升级 | update 的校验、备份、观察、回滚 | Shell/PowerShell 已实现，待真实升级 E2E |
 | 安全卸载 | 默认保留 + `--purge` 双确认 | Shell/PowerShell 已实现，待 Windows/macOS E2E |
-| 镜像公开发布 | ACR Personal Public 仓库已建立 | 仓库已建；新个人版不支持匿名拉取，首版需要登录，镜像待双架构 Gate |
-| Windows 与 Mac 都能跑通 | 单合同 + 双平台实现与 E2E 矩阵 | 已设计，待真实实现验证 |
+| 镜像公开发布 | ACR Personal Public 仓库已建立 | `0.1.0` 多架构清单已发布并固定 digest；匿名 token、manifest 与真实 blob 验证通过 |
+| Windows 与 Mac 都能跑通 | 单合同 + 双平台实现与 E2E 矩阵 | 双平台脚本已实现；待真实 Windows/macOS 实机 E2E |
+
+### 20.1 2026-08-17 实施快照
+
+- 已实现 bot、codex、provider-proxy、mysql 四服务边界，以及 Shell/PowerShell 的 install、start、stop、status、logs、manage、update、uninstall。
+- ACR `0.1.0` 总清单已发布，digest 为 `sha256:5269d0fdfb0c5c061e20cfa402d67fe4910e38c9d5b2fc43952eb912fe2b4e1e`，已回读包含 `linux/amd64` 与 `linux/arm64`。
+- 新安装器与 `space.lock.json` 均按该总 digest 固定，不依赖 tag 漂移。
+- Go build/vet/race test、Docker release contract、双架构非 root/Codex smoke 和本地 Secret canary 已通过。
+- 该快照达到“公开验证版”：空 Docker 配置按总 digest 匿名拉取已通过；真实 Windows/macOS、飞书消息、百炼/DeepSeek、Workspace ZIP 导入和数据库恢复演练仍是稳定发行 Gate。
 
 ## 21. 实施前仍需人工确认的三点
 
 1. 项目源码与公开镜像采用哪种 LICENSE。当前不得从“公开可拉取”推断成 MIT/Apache 等授权。
-2. 课程发行是否必须免登录。如果必须，不能继续把新 ACR 个人版当最终渠道，需要选择支持匿名拉取的渠道或企业版方案。
+2. 课程集中安装如何控制并发与重试。个人版采用共享带宽且可能限流，应分批安装；若课程规模要求固定带宽，需要企业版或备用公开渠道。
 3. XiaoPaw 导出侧是否同步升级为便携路径合同。若不升级，Bot 侧导入器需要承担更多 runtime projection；无论选择哪一侧，AIPM Dev/Use 真实导入 Gate 都不能省略。
 
 ## 参考资料
@@ -1024,5 +1032,6 @@ crpi-0c1kby082wk3ovcx.cn-hangzhou.personal.cr.aliyuncs.com/
 - [Docker Desktop for Mac](https://docs.docker.com/desktop/setup/install/mac-install/)
 - [Docker Desktop for Windows](https://docs.docker.com/desktop/setup/install/windows-install/)
 - [Docker multi-platform builds](https://docs.docker.com/build/building/multi-platform/)
-- [阿里云 ACR：新个人版实例独立域名与匿名拉取限制](https://help.aliyun.com/zh/acr/user-guide/individual-edition-instance-independent-domain-name-capacity-limit)
+- [阿里云 ACR：新个人版实例独立域名与共享带宽限制](https://help.aliyun.com/zh/acr/user-guide/individual-edition-instance-independent-domain-name-capacity-limit)
+- [本轮 Sub Agent Review 收口报告](06-docker-deploy-review-report.md)
 - 本仓库 `AGENTS.md`、`README.md`、`docker-compose.yml`、`config.yaml.template`、`cmd/server`、`cmd/appctl`、`internal/config`、`migrations/`。

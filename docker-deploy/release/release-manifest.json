@@ -6,7 +6,6 @@
   "database_rollback": "restore_dump_if_incompatible",
   "image": {
     "repository": "crpi-0c1kby082wk3ovcx.cn-hangzhou.personal.cr.aliyuncs.com/codex-workspace/codex-workspace-bot",
-    "digest": "sha256:REPLACED_BY_PUBLISH"
+    "digest": "sha256:5269d0fdfb0c5c061e20cfa402d67fe4910e38c9d5b2fc43952eb912fe2b4e1e"
   }
 }
-

@@ -8,7 +8,7 @@
 - Compose、Space、App、Provider 与日常管理脚本模板。
 - ACR 发布与跨平台安装验收脚本。
 
-当前状态：**v0.1 实现中。** 四服务 Secret 隔离、双平台安装入口和启动、停止、状态、日志、App 管理、更新、卸载脚本已经落地；在镜像完成双架构构建、登录拉取与真实飞书 E2E 前，不把它标记为稳定发行版。ACR 新个人版不支持匿名拉取，免登录发行需要另选渠道。
+当前状态：**v0.1 公开验证版。** 四服务 Secret 隔离、双平台安装入口和启动、停止、状态、日志、App 管理、更新、卸载脚本已经落地；多架构镜像已发布并通过匿名 manifest/blob 验证。真实 Windows/macOS、飞书、Provider 与数据库恢复 E2E 完成前，不把它标记为稳定发行版。
 
 ## 目录
 
@@ -50,12 +50,12 @@ docker login <ACR域名> --password-stdin
 
 登录凭据只进入进程和临时 Docker 配置，禁止写进仓库、脚本、构建参数或发行包。
 
-> 当前限制：新 ACR 个人版实例即使仓库类型为 Public，也不支持匿名拉取。安装者不仅要 `docker login`，还必须拥有仓库拉取权限；因此不能靠向学员共享维护者密码来公开分发。个人版目前只适合开发和内部验证；正式课程需要迁移到支持匿名拉取的公开制品渠道。
+> 当前限制：该 Public 仓库已经通过无凭据 token、manifest、真实 blob HEAD，以及空 Docker 配置按总 digest 拉取验证，可匿名使用，不应向学员分发任何 Registry 凭据。ACR 个人版使用共享带宽、没有固定出口带宽保障，高峰期可能限速；课程集中安装时应分批并准备重试说明。
 
-实现前请先阅读：
+继续迭代前请先阅读：
 
 - [Docker Deploy：跨平台交互安装器与 Space 发行设计](../docs/05-docker-deploy-cross-platform-installer-design.md)
 - [概要设计](../docs/02-redesign-high-level.md)
 - [Codex App Server 协议调研](../docs/01-codex-appserver-protocol-research.md)
 
-正式实现必须遵守设计文档中的双平台单合同、Secret 不进 Git、Responses Provider、Space 事务生成与真实 E2E Gate。
+后续迭代必须继续遵守设计文档中的双平台单合同、Secret 不进 Git、Responses Provider、Space 事务生成与真实 E2E Gate。
