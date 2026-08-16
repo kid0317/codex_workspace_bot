@@ -20,7 +20,7 @@ Write-Host "1. 阿里百炼 Responses"
 Write-Host "2. DeepSeek Responses"
 $providerChoice = Read-Host "请输入 1 或 2"
 switch ($providerChoice) {
-    "1" { $providerKind = "bailian-responses"; $defaultBase = "https://dashscope.aliyuncs.com/api/v2/apps"; $defaultModel = "qwen3-coder-plus" }
+    "1" { $providerKind = "bailian-responses"; $defaultBase = "https://dashscope.aliyuncs.com/compatible-mode/v1"; $defaultModel = "qwen3.7-max" }
     "2" { $providerKind = "deepseek-responses"; $defaultBase = "https://api.deepseek.com"; $defaultModel = "deepseek-chat" }
     default { throw "只能输入 1 或 2。" }
 }
@@ -41,6 +41,16 @@ function New-RandomHex([int]$Bytes = 32) {
     $rng = [Security.Cryptography.RandomNumberGenerator]::Create()
     try { $rng.GetBytes($buffer) } finally { $rng.Dispose() }
     return -join ($buffer | ForEach-Object { $_.ToString("x2") })
+}
+
+function Protect-CurrentUserFile([string]$Path) {
+    $identity = [Security.Principal.WindowsIdentity]::GetCurrent().User
+    $acl = New-Object Security.AccessControl.FileSecurity
+    $acl.SetOwner($identity)
+    $acl.SetAccessRuleProtection($true, $false)
+    $rule = New-Object Security.AccessControl.FileSystemAccessRule($identity, "FullControl", "Allow")
+    $acl.AddAccessRule($rule)
+    Set-Acl -LiteralPath $Path -AclObject $acl
 }
 
 $spaceId = "space-" + (New-RandomHex).Substring(0, 16)
@@ -75,6 +85,9 @@ try {
     $spaceLock = [ordered]@{ schema_version = 1; space_id = $spaceId; version = "0.1.0"; image_digest = ""; provider_kind = $providerKind }
     $spaceLock | ConvertTo-Json | Set-Content -Encoding utf8 (Join-Path $staging "space.lock.json")
     [IO.File]::WriteAllLines((Join-Path $staging ".gitignore"), @(".env", ".secrets/", "system/backups/", "logs/", "attachments/"), [Text.UTF8Encoding]::new($false))
+    foreach ($protectedFile in @(".env", ".secrets\provider.env", ".secrets\mysql.env", ".secrets\bot.env", "space.lock.json", "system\codex-home\config.toml")) {
+        Protect-CurrentUserFile (Join-Path $staging $protectedFile)
+    }
 
     & docker compose --project-directory $staging -f (Join-Path $staging "compose.yaml") config --quiet
     if ($LASTEXITCODE -ne 0) { throw "Compose 配置校验失败。" }
@@ -91,4 +104,3 @@ $addWorkspace = Read-Host "现在添加第一个 Workspace 吗？[Y/n]"
 if ($addWorkspace -notmatch '^[Nn]$') { & (Join-Path $installPath "manage.ps1") }
 $startNow = Read-Host "现在启动服务吗？[Y/n]"
 if ($startNow -notmatch '^[Nn]$') { & (Join-Path $installPath "start.ps1") } else { Write-Host "以后进入该文件夹，运行 .\start.ps1 即可启动。" }
-

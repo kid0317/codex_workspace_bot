@@ -65,5 +65,19 @@ fi
 for script in "$deploy_dir"/templates/*.sh "$deploy_dir/install.sh" "$deploy_dir/publish.sh"; do
   bash -n "$script"
 done
+grep -Fq 'build-platform' "$deploy_dir/publish.sh"
+grep -Fq 'create-manifest' "$deploy_dir/publish.sh"
+grep -Fq -- '--provenance=false' "$deploy_dir/publish.sh"
+if grep -Eqi '(AccessKey|SecretKey)=' "$deploy_dir/publish.sh"; then
+  echo "publisher must not contain registry credentials" >&2
+  exit 1
+fi
+grep -Fq 'https://dashscope.aliyuncs.com/compatible-mode/v1' "$deploy_dir/install.sh"
+grep -Fq 'https://dashscope.aliyuncs.com/compatible-mode/v1' "$deploy_dir/install.ps1"
+grep -Fq 'SetAccessRuleProtection($true, $false)' "$deploy_dir/install.ps1"
+if rg -q 'dashscope\.aliyuncs\.com/api/v2/apps' "$deploy_dir"; then
+  echo "obsolete Bailian Base URL found" >&2
+  exit 1
+fi
 
 echo "docker release contract: PASS"

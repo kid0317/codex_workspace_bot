@@ -70,6 +70,8 @@ codex app-server daemon start
 
 所有消息都遵循 JSON-RPC 2.0 标准，stdio 模式下**每行一个 JSON 消息**（newline-delimited）。
 
+Docker 发行模式为了把能执行 Shell 的 Agent 与 Bot/飞书/数据库 Secret 隔离到不同容器，可以在 stdio 两端之间加入一个**不解析、不改写、不缓存**的 byte-transparent TCP bridge。Bot 侧 `codex-remote` 仍表现为 stdio child，Codex 容器内 `codex-bridge` 独占启动唯一的 `codex app-server --stdio`；每行 JSON 的顺序、边界、backpressure、EOF 和进程生命周期必须原样传播。它不是共享 App Server daemon，也不能接受第二个并发 client。是否可用仍以 Bot 完成 JSON-RPC `initialize` 为准，而不是只看 TCP 端口存活。
+
 #### 四种消息类型
 
 ```jsonc

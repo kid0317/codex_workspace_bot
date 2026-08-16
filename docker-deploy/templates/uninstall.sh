@@ -32,7 +32,7 @@ if compose ps --status running --services | grep -qx mysql; then
 fi
 compose down -v
 
-for generated in compose.yaml .env start.sh stop.sh status.sh logs.sh manage.sh update.sh uninstall.sh start.ps1 stop.ps1 status.ps1 logs.ps1 manage.ps1 update.ps1 uninstall.ps1 lib.sh; do
+for generated in compose.yaml .env start.sh stop.sh status.sh logs.sh manage.sh update.sh uninstall.sh start.ps1 stop.ps1 status.ps1 logs.ps1 manage.ps1 update.ps1 uninstall.ps1 lib.sh lib.ps1; do
   rm -f "$space_root/$generated"
 done
 rm -rf "$space_root/config" "$space_root/.secrets" "$space_root/system/codex-home" "$space_root/system/home" "$space_root/system/bot-home" "$space_root/logs" "$space_root/attachments"
@@ -40,5 +40,8 @@ if $delete_backups; then
   rm -rf "$space_root/system/backups"
 fi
 rm -f "$space_root/space.lock.json"
-echo "受管运行环境已删除。apps/ 和默认备份仍保留；你可以检查后手工删除整个 Space 文件夹。"
-
+if $delete_backups; then
+  echo "受管运行环境已删除。apps/ 保留，备份已按要求删除。"
+else
+  echo "受管运行环境已删除。apps/ 和备份仍保留；你可以检查后手工删除整个 Space 文件夹。"
+fi

@@ -1,10 +1,10 @@
 # Docker Deploy：跨平台交互安装器与 Space 发行设计
 
-> 版本：v0.1
+> 版本：v0.2
 >
 > 日期：2026-08-16
 >
-> 状态：设计完成，待按阶段实现与真实双平台验收
+> 状态：Sub Agent Review 后修订，进入实现与真实双平台验收
 >
 > 目标仓库：`codex_workspace_bot`
 
@@ -15,7 +15,7 @@
 - macOS / Linux：`install.sh`
 - Windows：`install.ps1`
 
-两个脚本负责检查 Docker、询问安装路径、模型 Provider、Base URL、API Key、初始 Workspace 与飞书应用信息，然后生成相同结构的本地 Space，拉取 Bot 与 MySQL 镜像，并准备可重复使用的启动、停止、检查、日志和新增 App 脚本。
+两个脚本负责检查 Docker、询问安装路径、模型 Provider、Base URL、API Key、初始 Workspace 与飞书应用信息，然后生成相同结构的本地 Space，拉取发行镜像，并准备可重复使用的启动、停止、状态、日志、App 管理、更新和卸载脚本。
 
 用户完成一次安装后，日常只需要进入 Space 目录运行：
 
@@ -37,14 +37,18 @@ Shell 和 PowerShell 负责各自操作系统的路径、隐藏输入、解压�
 
 不能把它做成两套各自演进的安装产品。相同回答在 macOS、Linux 和 Windows 上生成的非敏感配置应当语义一致。
 
-### 2.2 一个安装包，不是一个巨型容器
+### 2.2 一个安装包，四个隔离服务
 
-用户体验是一份 Space 和一条启动命令；内部仍由 Compose 管理两个容器：
+用户体验是一份 Space 和一条启动命令；内部由 Compose 管理四个服务：
 
-- `bot`：Codex Workspace Bot、Codex CLI、`appctl`、新增的 `spacectl` 和 migrations。
+- `bot`：飞书 Receiver、Worker、MySQL、`appctl`、`spacectl` 和业务 Secret；不运行 Agent。
+- `codex`：唯一 `codex app-server --stdio`、Workspace 与 `CODEX_HOME`；看不到飞书、DB、HMAC 与真实 Provider Key。
+- `provider-proxy`：仅持有 Provider API Key，向固定上游转发 Responses 请求；不挂载 Workspace。
 - `mysql`：MySQL 8.4，保存 App、会话、消息、任务和运行状态。
 
 Redis 不是当前依赖，不进入镜像或 Compose。
+
+Bot 通过一个无业务语义的 stdio/TCP bridge 驱动 Codex 容器。这个 bridge 保留当前“一个长期 App Server 服务多个 Workspace”的产品合同，同时把可执行 Shell 的 Agent 与 Bot Secret 放进不同进程、容器、挂载和网络边界。
 
 ### 2.3 Space 共享 Provider，多 App 各自绑定 Workspace
 
@@ -76,6 +80,8 @@ Redis 不是当前依赖，不进入镜像或 Compose。
 6. 安装结束前完成 Compose 语法、Provider、Workspace 与 App 配置检查。
 7. 镜像、Provider 模板和安装器都有明确版本，可升级和回滚。
 8. 安装失败不能留下看似完整、实际不可启动的半成品 Space。
+9. 用户可以用对等的 Shell/PowerShell 命令完成检查更新、升级、回滚准备和安全卸载。
+10. Codex/Workspace 无法读取 Bot、其他 App 或 ACR 的 Secret。
 
 ### 3.2 非目标
 
@@ -85,7 +91,7 @@ Redis 不是当前依赖，不进入镜像或 Compose。
 - 不让安装器自动申请飞书企业、权限或发布应用版本。
 - 不在线修改 XiaoPaw 平台中的 Workspace。
 - 不把 API Key、飞书 Secret 或数据库密码提交到 Git。
-- 不在本设计阶段构建、推送 ACR 镜像或交付可执行安装脚本。
+- 不承诺 ACR 个人版具备生产 SLA；课程与个人使用接受其开发测试定位。
 
 ### 3.3 用户前置条件
 
@@ -102,12 +108,14 @@ Redis 不是当前依赖，不进入镜像或 Compose。
 | server 与 appctl 会自动执行 migrations | 不需要手工 SQL | 容器入口等待 MySQL 后继续自动迁移 |
 | server 没有 enabled App 时退出 | 零 Workspace 不能直接启动 Bot | 安装器只准备 Space；新增 App 后再启动 |
 | App 当前唯一事实在 MySQL | 只写 `app.yaml` 不会生效 | `spacectl reconcile` 读取 manifest 并幂等 upsert |
-| `appctl` 把 Secret 放在 CLI 参数 | 容易进入进程参数与历史 | 新工具通过 env 引用或受控文件读取，不把 Secret 放参数中 |
+| 已有工作树正在增加 `appctl --secret-env` | 可以避免 Secret 进入 argv | `spacectl` 延续 env 引用并增加幂等文件 reconcile |
 | 配置模板假定 Bot 在宿主机运行 | `127.0.0.1` 无法连接 Compose MySQL | 容器模板改为 `database.host=mysql` |
 | 日志与附件使用相对本机路径 | 容器删除后可能丢失 | 统一写入 `/space/system/` 挂载目录 |
 | 现有 Compose bind mount MySQL 数据 | Docker Desktop 跨平台体验不稳定 | 使用 Docker named volume |
 | 单 app-server 服务多 Workspace | 可按 cwd 路由多个 App | Space 只能共享 Provider/CODEX_HOME |
 | XiaoPaw 包可能含平台绝对路径 | 多 Workspace 无法共享 `/home/codex/workspace` | 增加导入检查和 runtime projection |
+| App Server 当前继承 Bot 环境 | Agent Shell 可能读取跨 App Secret | Bot/Codex/Provider proxy 分容器，Bot child env 使用 allowlist |
+| migration 包含不可简单反向的变更 | 切回旧镜像不等于数据库回滚 | update 前导出 MySQL；失败按 release 兼容声明决定切镜像或恢复数据 |
 
 ## 5. 仓库目录设计
 
@@ -122,7 +130,7 @@ docker-deploy/
 ├── image/
 │   ├── Dockerfile
 │   ├── entrypoint.sh
-│   └── dockerignore
+│   └── Dockerfile.dockerignore
 ├── templates/
 │   ├── space/
 │   │   ├── compose.yaml
@@ -151,11 +159,15 @@ docker-deploy/
 │       ├── status.sh
 │       ├── logs.sh
 │       ├── manage.sh
+│       ├── update.sh
+│       ├── uninstall.sh
 │       ├── start.ps1
 │       ├── stop.ps1
 │       ├── status.ps1
 │       ├── logs.ps1
-│       └── manage.ps1
+│       ├── manage.ps1
+│       ├── update.ps1
+│       └── uninstall.ps1
 ├── schemas/
 │   ├── space.schema.json
 │   ├── app.schema.json
@@ -163,7 +175,9 @@ docker-deploy/
 ├── release/
 │   ├── build-multiarch.sh
 │   ├── publish-acr.sh
-│   └── verify-manifest.sh
+│   ├── verify-manifest.sh
+│   ├── release-manifest.json
+│   └── release-manifest.json.sha256
 └── tests/
     ├── fixtures/
     ├── golden/
@@ -193,8 +207,14 @@ docker-deploy/
 ```text
 codex-space/
 ├── compose.yaml
-├── .env                         # Compose/MySQL Secret，禁止提交
+├── .env                         # 非敏感 Compose 版本/端口值
 ├── .env.example
+├── .secrets/                    # 从不挂载给 Codex
+│   ├── mysql.env
+│   ├── bot.env
+│   └── provider.env
+├── config/
+│   └── bot.yaml
 ├── space.yaml
 ├── space.lock.json              # 非敏感安装与版本清单
 ├── start.sh
@@ -202,11 +222,15 @@ codex-space/
 ├── status.sh
 ├── logs.sh
 ├── manage.sh
+├── update.sh
+├── uninstall.sh
 ├── start.ps1
 ├── stop.ps1
 ├── status.ps1
 ├── logs.ps1
 ├── manage.ps1
+├── update.ps1
+├── uninstall.ps1
 ├── apps/
 │   ├── aipm-assistant/
 │   │   ├── app.yaml
@@ -216,8 +240,6 @@ codex-space/
 │   │   └── compatibility-report.md
 │   └── another-app/
 └── system/
-    ├── bot.yaml
-    ├── runtime.env              # Provider、飞书与 Bot Secret，禁止提交
     ├── codex-home/
     │   ├── config.toml
     │   ├── models.json
@@ -356,7 +378,7 @@ wire_api = "responses"
 还要继续添加 Workspace 吗？[y/N]
 ```
 
-每个 App 的 Secret 写成 `system/runtime.env` 中的独立变量，例如：
+每个 App 的 Secret 写入 `.secrets/bot.env` 中的独立变量，例如：
 
 ```dotenv
 FEISHU_AIPM_ASSISTANT_APP_ID=cli_xxx
@@ -503,12 +525,26 @@ PowerShell：
 
 ### 9.3 Secret 文件写入约束
 
-- `.env` 只保存 Compose/MySQL 所需值；`system/runtime.env` 保存 Provider API Key、飞书 App 信息和 Bot 业务 key，避免把 MySQL root password 注入 Bot。
-- 两个 Secret 文件都只允许单行值，发现换行立即拒绝。
-- Key 不传到 `docker ... --env KEY=value` 的命令行参数中。
-- 两个 Secret 文件的权限在 macOS/Linux 设为 `0600`；Windows 收紧为当前用户可读，并禁止安装到公共共享目录。
+- `.env` 只保存镜像 digest、端口、项目名等非敏感 Compose 变量。
+- `.secrets/mysql.env` 只注入 MySQL；`.secrets/bot.env` 只注入 Bot；`.secrets/provider.env` 只注入 Provider proxy。
+- Codex 容器不加载任何 `.secrets/*.env`，也不挂载 `.secrets`、Bot 配置或 MySQL 数据。
+- Bot 只拿自己的飞书、数据库和业务 key，不拿 Provider 原始 API Key；Provider proxy 只拿 Provider Key，不拿飞书、数据库或 Workspace。
+- 所有 Secret 文件都只允许单行值，发现换行立即拒绝。
+- Key 不传到 `docker ... --env KEY=value`、程序 argv 或 release manifest 中。
+- Secret 文件在 macOS/Linux 设为 `0600`；Windows 收紧为当前用户可读，并禁止安装到公共共享目录。
 - 日志和确认页永不显示完整 Secret，只显示“未填 / 已填”。
-- `.env`、`system/runtime.env`、备份 Secret、导入临时文件都在 `.gitignore` 范围内。
+- `.env`、`.secrets/`、备份 Secret、导入临时文件都在 `.gitignore` 范围内。
+
+### 9.4 Agent Secret 隔离 Gate
+
+仅靠文件权限无法防住能执行 Shell 的 Agent。发行版必须同时满足：
+
+1. Bot 启动 `codex-remote` 时使用显式环境白名单；不得继承 Bot 全部环境。
+2. `codex-remote` 只获得 bridge 地址、PATH、HOME、LANG 等最小运行变量。
+3. `codex-bridge` 在独立 Codex 容器里启动唯一的 `codex app-server --stdio`。
+4. App Server 的 Provider URL 指向内部固定上游的 proxy；Codex 只看到无价值的占位 token。
+5. Provider proxy 删除来访认证头，再用自己的 Secret 注入真实上游认证；不记录请求头和请求体。
+6. Canary E2E 必须从飞书消息触发 Agent，验证 `env`、`/proc/*/environ`、挂载目录和 Workspace 都读不到 Provider、飞书、DB、HMAC 或其他 App Secret。
 
 ## 10. `spacectl` 设计
 
@@ -589,33 +625,70 @@ services:
       timeout: 3s
       retries: 30
     restart: unless-stopped
+    networks: [data]
 
   bot:
     image: ${BOT_IMAGE}
-    env_file: ./system/runtime.env
+    env_file: ./.secrets/bot.env
     environment:
-      HOME: /space/system/home
-      CODEX_HOME: /space/system/codex-home
-      CODEX_WORKSPACE_BOT_DB_PASSWORD: ${CODEX_WORKSPACE_BOT_DB_PASSWORD}
+      CODEX_COMMAND: /usr/local/bin/codex-remote
+      CODEX_BRIDGE_ADDR: codex:7070
+      CODEX_CHILD_ENV_ALLOWLIST: PATH,HOME,LANG,LC_ALL,CODEX_BRIDGE_ADDR
     volumes:
-      - ./apps:/space/apps
-      - ./system:/space/system
+      - ./apps:/space/apps:ro
+      - ./attachments:/space/attachments
+      - ./config/bot.yaml:/space/config/bot.yaml:ro
     depends_on:
       mysql:
         condition: service_healthy
+      codex:
+        condition: service_healthy
     ports:
       - "127.0.0.1:${BOT_HOST_PORT}:8080"
+    stop_grace_period: 45s
     restart: unless-stopped
+    networks: [data, control]
+
+  codex:
+    image: ${BOT_IMAGE}
+    command: ["/usr/local/bin/codex-bridge"]
+    environment:
+      CODEX_HOME: /space/system/codex-home
+      CODEX_BRIDGE_LISTEN: 0.0.0.0:7070
+      CODEX_BRIDGE_HEALTH_LISTEN: 0.0.0.0:7071
+    volumes:
+      - ./apps:/space/apps
+      - ./attachments:/space/attachments
+      - ./system/codex-home:/space/system/codex-home
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/codex-remote", "--health", "codex:7071"]
+    stop_grace_period: 45s
+    restart: unless-stopped
+    networks: [control, model]
+
+  provider-proxy:
+    image: ${BOT_IMAGE}
+    command: ["/usr/local/bin/provider-proxy"]
+    env_file: ./.secrets/provider.env
+    restart: unless-stopped
+    networks: [model]
 
 volumes:
   mysql-data:
+
+networks:
+  data: {}
+  control: {}
+  model: {}
 ```
 
-MySQL 不发布宿主机端口。Bot 通过 Compose 服务名 `mysql` 连接数据库。Bot entrypoint 顺序为：
+MySQL、Codex bridge 和 Provider proxy 都不发布宿主机端口。Bot 只通过 `data` 网络访问 MySQL，通过 `control` 网络访问 bridge；Codex 只能通过 `model` 网络访问 Provider proxy。任何服务都不挂载 Docker socket。
+
+Bot entrypoint 顺序为：
 
 ```text
 预检挂载 → 等待 MySQL → migrations → spacectl validate/reconcile
-→ exec server --config /space/system/bot.yaml
+→ exec server --config /space/config/bot.yaml
 ```
 
 入口必须以 `exec` 让 server 成为主进程，并正确接收 SIGTERM。容器内不再使用宿主机专用的 `bot_controller.sh`。
@@ -681,6 +754,8 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\docker-deploy\install.
 | 状态 | `./status.sh` | `.\status.ps1` |
 | 日志 | `./logs.sh` | `.\logs.ps1` |
 | 新增/更新 App | `./manage.sh` | `.\manage.ps1` |
+| 检查/执行更新 | `./update.sh` | `.\update.ps1` |
+| 卸载 | `./uninstall.sh` | `.\uninstall.ps1` |
 
 ### 14.1 `start`
 
@@ -697,6 +772,28 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\docker-deploy\install.
 ### 14.3 `manage`
 
 复用安装器的 App 问卷和 Workspace 导入逻辑，完成后运行 `spacectl reconcile` 并询问是否重启 Bot。不能要求用户手工拼 `appctl --secret ...`。
+
+### 14.4 `status` 与 `logs`
+
+- `status` 同时显示 Compose 状态、Bot `/readyz`、Codex bridge、Provider proxy、MySQL 与每个飞书 Receiver；区分 `ready`、`degraded`、`stopped`。
+- `logs` 默认显示 Bot 最近 200 行，可用参数选择服务和 follow；调用前检查服务名白名单，输出不得包含 env 或配置 Secret。
+
+### 14.5 `update`
+
+1. `--check` 只下载并验证 release manifest，不修改运行环境。
+2. 校验 manifest 签名或随发行包提供的 SHA-256，再取得镜像 digest；不从未校验的 `latest` 升级。
+3. 获取 Space 互斥锁，运行 doctor，并把 MySQL dump、配置和旧 lock 写到带时间戳的备份目录。
+4. 按 digest 拉取候选镜像，运行 `docker compose config --quiet` 和离线兼容检查。
+5. 切换镜像并启动，等待所有 readiness 和 Receiver 观察窗通过后才更新 `space.lock.json`。
+6. 失败时恢复旧 manifest、Compose 和 digest；若候选版本执行了不兼容 migration，则停止服务并从本次 dump 恢复数据库，不能只切回旧镜像。
+7. 保留最近 N 个成功备份，清理前显示精确路径；不运行全局 `docker system prune`。
+
+### 14.6 `uninstall`
+
+- 默认卸载只停止并 `docker compose down`，保留整个 Space、Workspace、Secret、附件和 MySQL volume，可再次启动。
+- `--purge` 才删除受管 volume 和 Space 内生成物。执行前校验 `space.lock.json`、Compose label 和绝对路径，并要求用户完整输入 Space ID 二次确认。
+- 不删除 Space 外文件，不跟随 symlink，不运行全局 prune，不删除其他 Compose project 的资源。
+- purge 前默认生成最后一次 MySQL dump；用户显式选择“连备份一起删除”才删除备份，并说明不可恢复。
 
 ## 15. 重跑、升级与失败恢复
 
@@ -736,11 +833,32 @@ NEW
 - Provider 测试失败：允许用户返回修改 Base URL/model/Key；不打印 Key。
 - 飞书 Receiver 失败：Space 可以保留，但结果标记“本地服务已启动，飞书尚未就绪”。
 
+### 15.4 更新状态机
+
+```text
+IDLE → MANIFEST_VERIFIED → BACKUP_COMPLETE → CANDIDATE_PULLED
+     → CONFIG_VALIDATED → SWITCHED → OBSERVING → COMMITTED
+                                      └──失败→ ROLLBACK/DB_RESTORE → VERIFIED_OLD
+```
+
+release manifest 必须声明 Space Schema、DB migration 兼容范围、最低安装器版本和是否支持 N-1 直接回滚。没有兼容声明时，更新器按“可能需要恢复数据库”的保守路径处理。
+
 ## 16. 镜像发布设计
 
 ### 16.1 ACR
 
-首版发布到阿里云 ACR 公开仓库，用户匿名拉取。Compose 固定版本或 digest，不依赖 `latest`。
+首版仓库已经准备为：
+
+```text
+crpi-0c1kby082wk3ovcx.cn-hangzhou.personal.cr.aliyuncs.com/
+  codex-workspace/codex-workspace-bot
+```
+
+仓库类型已设为 `PUBLIC`，但阿里云当前的新个人版 `crpi-` 实例明确**不支持匿名拉取**，Public 只代表仓库可见性，用户安装前仍需完成一次 `docker login`。ACR 个人版只用于课程和个人体验，不宣称生产 SLA。Compose 固定 release manifest 中的 digest，不依赖 `latest`。
+
+这意味着“国内可直接免登录下载”目前没有在个人版 ACR 上实现。首版采取“公开仓库 + 登录后按 digest 拉取”；若课程必须做到真正免登录，需要另行选择支持匿名拉取的公开制品渠道或开通合适的企业版实例。这属于发行渠道决策，不能靠安装脚本绕过。
+
+维护者侧使用阿里云 API 临时 Docker 凭据、临时 `DOCKER_CONFIG` 和 `docker login --password-stdin`；退出时清理临时目录。AK/SK、registry password、Docker auth JSON 都不进入 argv、日志、Git 或发行包。由于临时令牌有效期有限，`publish.sh` 分别发布 amd64、arm64，再合成总 manifest；每一步之前都可以刷新登录，不在一个长任务中赌令牌寿命。
 
 ### 16.2 架构
 
@@ -753,14 +871,16 @@ NEW
 
 ### 16.3 发布 Gate
 
-当前仓库尚无 LICENSE 文件。公开镜像前必须补齐：
+公开镜像前必须满足：
 
-- 项目 LICENSE。
+- 项目尚无 LICENSE，因此 OCI license label 先用 `NOASSERTION`，发行说明明确“公开拉取不等于授予源码许可证”；许可证选择由维护者另行决定，安装器不得擅自声明 MIT 等许可证。
 - 第三方 Notice 与镜像基础组件许可证清单。
 - Bot/Codex/Space Schema/Git commit OCI labels。
 - 无 Secret 构建上下文扫描。
+- 以非 root 用户运行，镜像不包含编译器、源码、测试数据或 Docker CLI。
+- release manifest、checksums、SBOM 与 provenance 随发行版保存；镜像 digest 进入 lock。
 - amd64/arm64 冒烟测试。
-- 中国大陆网络环境匿名拉取测试。
+- 中国大陆网络环境登录后按 digest 拉取测试；匿名拉取作为渠道迁移后的目标，不列为 ACR 个人版 Gate。
 
 ## 17. 测试设计
 
@@ -796,6 +916,10 @@ NEW
 | INS-13 | Docker daemon 未启动 | 给平台对应修复说明，不写正式 Space |
 | INS-14 | Workspace 含平台绝对路径 | compatibility report 命中，App 默认不启用 |
 | INS-15 | `start` 后重启 Docker Desktop | MySQL、Codex 状态、日志和 App 均保留 |
+| INS-16 | 飞书消息要求读取 env/Secret | Agent 无法读取 Bot、Provider、DB、其他 App Secret |
+| INS-17 | 更新后 readiness 失败 | 自动恢复旧 digest；必要时恢复本次 DB dump |
+| INS-18 | 普通卸载 | 服务停止但 Space、volume、Workspace 和备份完整 |
+| INS-19 | purge 输入错误 Space ID | 拒绝删除，其他 Compose project 完全不受影响 |
 
 ### 17.3 真实 E2E 矩阵
 
@@ -815,6 +939,7 @@ NEW
 - 多阶段 Dockerfile、entrypoint、Compose。
 - 固定 Codex 版本与双架构镜像。
 - 容器内 MySQL、migration、app-server、SIGTERM 验证。
+- 四服务 Secret trust boundary 与 canary E2E。
 
 ### Phase 2：Space Schema 与 `spacectl`
 
@@ -842,7 +967,7 @@ NEW
 ### Phase 6：ACR 与教学发行
 
 - LICENSE/Notice。
-- 公开多架构镜像、Starter ZIP 和校验值。
+- 登录可拉取的多架构公开仓库、Starter ZIP 和校验值；另行决策免登录发行渠道。
 - 面向小白的 Windows/macOS 教程与全流程录像。
 
 ## 19. 最终验收标准
@@ -861,7 +986,9 @@ NEW
 12. 安装中断、拉取失败和 Provider 配错均能恢复，不产生伪成功。
 13. AIPM 助手 Dev/Use 导出包各通过一次真实导入与飞书消息 E2E。
 14. 普通停止不删除 named volume；删除数据必须是独立、明确确认的动作。
-15. 公开镜像可以从国内网络匿名拉取，且 manifest 同时含 amd64/arm64。
+15. ACR 个人版仓库经登录后可以从国内网络按 digest 拉取，且 manifest 同时含 amd64/arm64；若要求匿名拉取，必须先迁移发行渠道。
+16. Agent 的环境、文件系统和 `/proc` 看不到 Bot、Provider、数据库、HMAC 或其他 App Secret。
+17. 更新有已验证 manifest、DB 备份、观察窗和失败回滚；卸载默认保留数据，purge 必须二次确认。
 
 ## 20. 需求覆盖 Review
 
@@ -877,12 +1004,16 @@ NEW
 | 自动生成配置和 Compose | 独立版本化模板 | 已设计 |
 | 自动拉取全部镜像 | 阶段 H | 已设计 |
 | 后续直接用启动脚本 | start/stop/status/logs | 已设计 |
+| 后续维护与升级 | update 的校验、备份、观察、回滚 | Shell/PowerShell 已实现，待真实升级 E2E |
+| 安全卸载 | 默认保留 + `--purge` 双确认 | Shell/PowerShell 已实现，待 Windows/macOS E2E |
+| 镜像公开发布 | ACR Personal Public 仓库已建立 | 仓库已建；新个人版不支持匿名拉取，首版需要登录，镜像待双架构 Gate |
 | Windows 与 Mac 都能跑通 | 单合同 + 双平台实现与 E2E 矩阵 | 已设计，待真实实现验证 |
 
-## 21. 实施前仍需人工确认的两点
+## 21. 实施前仍需人工确认的三点
 
-1. 正式 ACR namespace、仓库地址和镜像命名。这不会改变安装器架构，只影响 release 配置和模板值。
-2. XiaoPaw 导出侧是否同步升级为便携路径合同。若不升级，Bot 侧导入器需要承担更多 runtime projection；无论选择哪一侧，AIPM Dev/Use 真实导入 Gate 都不能省略。
+1. 项目源码与公开镜像采用哪种 LICENSE。当前不得从“公开可拉取”推断成 MIT/Apache 等授权。
+2. 课程发行是否必须免登录。如果必须，不能继续把新 ACR 个人版当最终渠道，需要选择支持匿名拉取的渠道或企业版方案。
+3. XiaoPaw 导出侧是否同步升级为便携路径合同。若不升级，Bot 侧导入器需要承担更多 runtime projection；无论选择哪一侧，AIPM Dev/Use 真实导入 Gate 都不能省略。
 
 ## 参考资料
 
@@ -893,4 +1024,5 @@ NEW
 - [Docker Desktop for Mac](https://docs.docker.com/desktop/setup/install/mac-install/)
 - [Docker Desktop for Windows](https://docs.docker.com/desktop/setup/install/windows-install/)
 - [Docker multi-platform builds](https://docs.docker.com/build/building/multi-platform/)
+- [阿里云 ACR：新个人版实例独立域名与匿名拉取限制](https://help.aliyun.com/zh/acr/user-guide/individual-edition-instance-independent-domain-name-capacity-limit)
 - 本仓库 `AGENTS.md`、`README.md`、`docker-compose.yml`、`config.yaml.template`、`cmd/server`、`cmd/appctl`、`internal/config`、`migrations/`。
