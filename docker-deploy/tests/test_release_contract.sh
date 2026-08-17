@@ -77,6 +77,14 @@ grep -Fq 'https://dashscope.aliyuncs.com/compatible-mode/v1' "$deploy_dir/instal
 grep -Fq 'SetAccessRuleProtection($true, $false)' "$deploy_dir/install.ps1"
 grep -Fq '$attachmentKey = New-RandomBase64' "$deploy_dir/install.ps1"
 grep -Fq '$actionKey = New-RandomBase64' "$deploy_dir/install.ps1"
+if ! grep -Fq 'compose up -d --wait mysql' "$deploy_dir/templates/manage.sh"; then
+  echo "Linux/macOS Workspace registration must wait for MySQL health" >&2
+  exit 1
+fi
+if ! grep -Fq 'Invoke-Compose up -d --wait mysql' "$deploy_dir/templates/manage.ps1"; then
+  echo "Windows Workspace registration must wait for MySQL health" >&2
+  exit 1
+fi
 grep -Fq '已经通过匿名拉取验证' "$deploy_dir/install.sh"
 grep -Fq '已经通过匿名拉取验证' "$deploy_dir/install.ps1"
 if rg -q '(Public.*要求登录|不支持匿名拉取)' "$deploy_dir/install.sh" "$deploy_dir/install.ps1"; then
