@@ -85,6 +85,26 @@ if ! grep -Fq 'Invoke-Compose up -d --wait mysql' "$deploy_dir/templates/manage.
   echo "Windows Workspace registration must wait for MySQL health" >&2
   exit 1
 fi
+for backup_script in update.sh uninstall.sh; do
+  if ! grep -Fq 'umask 077' "$deploy_dir/templates/$backup_script"; then
+    echo "$backup_script must create secret-bearing backups with owner-only permissions" >&2
+    exit 1
+  fi
+  if ! grep -Fq 'mysqldump --no-tablespaces' "$deploy_dir/templates/$backup_script"; then
+    echo "$backup_script must support MySQL 8.4 dumps without PROCESS privilege" >&2
+    exit 1
+  fi
+done
+for backup_script in update.ps1 uninstall.ps1; do
+  if ! grep -Fq 'mysqldump --no-tablespaces' "$deploy_dir/templates/$backup_script"; then
+    echo "$backup_script must support MySQL 8.4 dumps without PROCESS privilege" >&2
+    exit 1
+  fi
+  if ! grep -Fq 'Protect-CurrentUserFile $backupPath' "$deploy_dir/templates/$backup_script"; then
+    echo "$backup_script must protect the secret-bearing database backup" >&2
+    exit 1
+  fi
+done
 grep -Fq '已经通过匿名拉取验证' "$deploy_dir/install.sh"
 grep -Fq '已经通过匿名拉取验证' "$deploy_dir/install.ps1"
 if rg -q '(Public.*要求登录|不支持匿名拉取)' "$deploy_dir/install.sh" "$deploy_dir/install.ps1"; then
