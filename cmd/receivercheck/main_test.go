@@ -19,6 +19,7 @@ func TestCheckReceiversRequiresExactConnectedSet(t *testing.T) {
 		{name: "too many", payload: `{"receivers":{"a":{"state":"connected"},"b":{"state":"connected"}}}`, expected: 1, wantErr: true},
 		{name: "empty", payload: `{"receivers":{}}`, expected: 1, wantErr: true},
 		{name: "malformed", payload: `{"receivers":`, expected: 1, wantErr: true},
+		{name: "trailing garbage", payload: `{"receivers":{"a":{"state":"connected"}}}garbage`, expected: 1, wantErr: true},
 		{name: "missing receivers", payload: `{"state":"connected"}`, expected: 1, wantErr: true},
 	}
 	for _, tc := range tests {

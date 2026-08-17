@@ -257,6 +257,9 @@ fi
 assert_contains "$fixture/calls.log" '--enabled=true'
 assert_contains "$fixture/calls.log" '--secret-stdin'
 assert_contains "$fixture/stdout" '已经登记并生效'
+assert_contains "$fixture/calls.log" 'http://127.0.0.1:8080/healthz'
+assert_contains "$fixture/calls.log" 'http://127.0.0.1:8080/readyz'
+[[ -z $(find "$fixture/root/runtime" -mindepth 1 -maxdepth 1 -print -quit) ]] || fail "private helper binaries must be cleaned after exit"
 while IFS= read -r curl_call; do
   [[ $curl_call == *'--connect-timeout 2'* ]] || fail "curl must bound connect time"
   [[ $curl_call == *'--max-time 5'* ]] || fail "curl must bound total time"

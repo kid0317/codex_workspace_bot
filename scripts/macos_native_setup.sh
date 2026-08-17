@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+set +x
 set -euo pipefail
 
 ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
@@ -198,6 +199,7 @@ existing_or_random() {
   if [[ -f $ENV_FILE ]]; then
     set -a
     . "$ENV_FILE"
+    set +x
     set +a
     eval "current=\${$name:-}"
   fi
@@ -262,11 +264,12 @@ register_app() {
 
   set -a
   . "$ENV_FILE"
+  set +x
   set +a
   export AIPM_FEISHU_APP_SECRET="$app_secret"
   (
     cd "$ROOT"
-    go run ./cmd/appctl create \
+    go run ./cmd/appctl upsert \
       --config ./config.yaml \
       --name "$app_name" \
       --app-id "$app_id" \

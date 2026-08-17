@@ -120,3 +120,47 @@ func (s *Store) UpsertApp(ctx context.Context, app App) error {
 	}
 	return nil
 }
+
+func (s *Store) CreateApp(ctx context.Context, app App) error {
+	const query = `INSERT INTO apps
+		(id, name, feishu_app_id, feishu_app_secret, workspace_dir, workspace_mode, model, reasoning_effort, enabled)
+		VALUES (UUID(), ?, ?, ?, ?, ?, ?, ?, ?)`
+	if _, err := s.DB.ExecContext(ctx, query,
+		app.Name, app.FeishuAppID, app.FeishuAppSecret, app.WorkspaceDir,
+		app.WorkspaceMode, app.Model, app.ReasoningEffort, app.Enabled,
+	); err != nil {
+		return fmt.Errorf("create app %q: %w", app.Name, err)
+	}
+	return nil
+}
+
+func (s *Store) UpdateApp(ctx context.Context, app App) error {
+	const query = `UPDATE apps SET
+		feishu_app_id=?, feishu_app_secret=?, workspace_dir=?, workspace_mode=?, model=?, reasoning_effort=?, enabled=?
+		WHERE name=?`
+	result, err := s.DB.ExecContext(ctx, query,
+		app.FeishuAppID, app.FeishuAppSecret, app.WorkspaceDir, app.WorkspaceMode,
+		app.Model, app.ReasoningEffort, app.Enabled, app.Name,
+	)
+	if err != nil {
+		return fmt.Errorf("update app %q: %w", app.Name, err)
+	}
+	changed, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("update app %q rows: %w", app.Name, err)
+	}
+	if changed == 1 {
+		return nil
+	}
+	if changed > 1 {
+		return fmt.Errorf("update app %q changed %d rows", app.Name, changed)
+	}
+	var exists bool
+	if err := s.DB.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM apps WHERE name=?)`, app.Name).Scan(&exists); err != nil {
+		return fmt.Errorf("update app %q existence: %w", app.Name, err)
+	}
+	if !exists {
+		return fmt.Errorf("update app: app %q not found", app.Name)
+	}
+	return nil
+}

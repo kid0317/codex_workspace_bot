@@ -4,6 +4,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -28,6 +29,7 @@ func main() {
 	appID := fs.String("app-id", "", "Feishu app id")
 	secret := fs.String("secret", "", "Feishu app secret")
 	secretEnv := fs.String("secret-env", "", "environment variable containing the Feishu app secret")
+	secretStdin := fs.Bool("secret-stdin", false, "read the Feishu app secret from stdin")
 	workspace := fs.String("workspace-dir", "", "absolute workspace directory")
 	model := fs.String("model", "gpt-5.6-terra", "model")
 	effort := fs.String("effort", "medium", "reasoning effort")
@@ -81,8 +83,8 @@ func main() {
 			fail(err)
 		}
 		fmt.Println("deleted", *name)
-	case "create", "update":
-		resolvedSecret, secretErr := resolveAppSecret(*secret, *secretEnv, os.LookupEnv)
+	case "create", "update", "upsert":
+		resolvedSecret, secretErr := resolveAppSecret(*secret, *secretEnv, *secretStdin, os.LookupEnv, os.Stdin)
 		if secretErr != nil {
 			fail(secretErr)
 		}
@@ -93,8 +95,18 @@ func main() {
 		if statErr != nil || !info.IsDir() {
 			fail(fmt.Errorf("workspace-dir must be an existing directory"))
 		}
-		if err := store.UpsertApp(context.Background(), storage.App{Name: *name, FeishuAppID: *appID, FeishuAppSecret: resolvedSecret, WorkspaceDir: *workspace, WorkspaceMode: "work", Model: *model, ReasoningEffort: *effort, Enabled: *enabled}); err != nil {
-			fail(err)
+		app := storage.App{Name: *name, FeishuAppID: *appID, FeishuAppSecret: resolvedSecret, WorkspaceDir: *workspace, WorkspaceMode: "work", Model: *model, ReasoningEffort: *effort, Enabled: *enabled}
+		var writeErr error
+		switch cmd {
+		case "create":
+			writeErr = store.CreateApp(context.Background(), app)
+		case "update":
+			writeErr = store.UpdateApp(context.Background(), app)
+		case "upsert":
+			writeErr = store.UpsertApp(context.Background(), app)
+		}
+		if writeErr != nil {
+			fail(writeErr)
 		}
 		fmt.Println("updated", *name)
 	default:
@@ -102,20 +114,48 @@ func main() {
 	}
 }
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: appctl create|update|import-legacy-app|list|enable|disable|delete --config config.yaml [--name NAME] [--secret-env ENV_NAME]")
+	fmt.Fprintln(os.Stderr, "usage: appctl create|update|upsert|import-legacy-app|list|enable|disable|delete --config config.yaml [--name NAME] [--secret-stdin|--secret-env ENV_NAME]")
 	os.Exit(2)
 }
 func fail(err error) { fmt.Fprintln(os.Stderr, "appctl:", err); os.Exit(1) }
 
 var environmentNamePattern = regexp.MustCompile("^[A-Za-z_][A-Za-z0-9_]*$")
 
-func resolveAppSecret(direct, environmentName string, lookup func(string) (string, bool)) (string, error) {
-	if direct != "" && environmentName != "" {
-		return "", fmt.Errorf("provide only one of --secret or --secret-env")
+const maxStdinSecretBytes = 256
+
+func resolveAppSecret(direct, environmentName string, stdin bool, lookup func(string) (string, bool), reader io.Reader) (string, error) {
+	sourceCount := 0
+	if direct != "" {
+		sourceCount++
+	}
+	if environmentName != "" {
+		sourceCount++
+	}
+	if stdin {
+		sourceCount++
+	}
+	if sourceCount > 1 {
+		return "", fmt.Errorf("provide only one of --secret, --secret-env or --secret-stdin")
+	}
+	if stdin {
+		value, err := io.ReadAll(io.LimitReader(reader, maxStdinSecretBytes+1))
+		if err != nil {
+			return "", fmt.Errorf("read --secret-stdin: %w", err)
+		}
+		if len(value) == 0 {
+			return "", fmt.Errorf("--secret-stdin is empty")
+		}
+		if len(value) > maxStdinSecretBytes {
+			return "", fmt.Errorf("--secret-stdin exceeds %d bytes", maxStdinSecretBytes)
+		}
+		if bytesContainLineBreak(value) {
+			return "", fmt.Errorf("--secret-stdin must not contain line breaks")
+		}
+		return string(value), nil
 	}
 	if environmentName == "" {
 		if direct == "" {
-			return "", fmt.Errorf("provide --secret-env (recommended) or --secret")
+			return "", fmt.Errorf("provide --secret-stdin (recommended), --secret-env or --secret")
 		}
 		return direct, nil
 	}
@@ -127,4 +167,13 @@ func resolveAppSecret(direct, environmentName string, lookup func(string) (strin
 		return "", fmt.Errorf("environment variable %s is not set or is empty", environmentName)
 	}
 	return secret, nil
+}
+
+func bytesContainLineBreak(value []byte) bool {
+	for _, b := range value {
+		if b == '\n' || b == '\r' {
+			return true
+		}
+	}
+	return false
 }

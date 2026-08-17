@@ -96,10 +96,36 @@ func TestUpdateAppUsesStrictUpdateAndRequiresExistingName(t *testing.T) {
 		WHERE name=?`)).
 		WithArgs(app.FeishuAppID, app.FeishuAppSecret, app.WorkspaceDir, app.WorkspaceMode, app.Model, app.ReasoningEffort, app.Enabled, app.Name).
 		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectQuery(regexp.QuoteMeta(`SELECT EXISTS(SELECT 1 FROM apps WHERE name=?)`)).
+		WithArgs(app.Name).
+		WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(false))
 
 	err = store.UpdateApp(context.Background(), app)
 	if err == nil || !strings.Contains(err.Error(), "not found") {
 		t.Fatalf("UpdateApp() error = %v, want not-found error", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestUpdateAppAcceptsExistingRowWithUnchangedValues(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	store := &storage.Store{DB: db}
+	app := storage.App{Name: "existing", Enabled: true}
+	mock.ExpectExec(regexp.QuoteMeta("UPDATE apps SET")).
+		WithArgs(app.FeishuAppID, app.FeishuAppSecret, app.WorkspaceDir, app.WorkspaceMode, app.Model, app.ReasoningEffort, app.Enabled, app.Name).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectQuery(regexp.QuoteMeta(`SELECT EXISTS(SELECT 1 FROM apps WHERE name=?)`)).
+		WithArgs(app.Name).
+		WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(true))
+
+	if err := store.UpdateApp(context.Background(), app); err != nil {
+		t.Fatalf("UpdateApp() error = %v", err)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)

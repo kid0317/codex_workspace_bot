@@ -10,6 +10,7 @@ fail() {
 }
 
 [[ -x $SETUP ]] || fail "macos_native_setup.sh is missing or not executable"
+[[ $(sed -n '2p' "$SETUP") == 'set +x' ]] || fail "setup must disable xtrace before reading secrets"
 
 help_output=$($SETUP --help)
 [[ $help_output == *'--check'* ]] || fail "help must document the preflight-only mode"

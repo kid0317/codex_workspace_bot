@@ -6,7 +6,11 @@ ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 ENV_FILE="$ROOT/.env"
 CONFIG_FILE="$ROOT/config.yaml"
 APPCTL_MAIN="$ROOT/cmd/appctl/main.go"
+RECEIVERCHECK_MAIN="$ROOT/cmd/receivercheck/main.go"
 CONTROLLER="$ROOT/macos_bot_controller.sh"
+PRIVATE_TOOL_DIR=
+APPCTL_BIN=
+RECEIVERCHECK_BIN=
 APP_LIST=
 CANCEL_STATUS=20
 DEFAULT_MODEL=gpt-5.6-terra
@@ -26,6 +30,28 @@ EOF
 fail() {
   printf '添加 Workspace：%s\n' "$*" >&2
   exit 1
+}
+
+cleanup_private_tools() {
+  [[ -n ${PRIVATE_TOOL_DIR:-} ]] || return 0
+  [[ -z ${APPCTL_BIN:-} ]] || rm -f -- "$APPCTL_BIN"
+  [[ -z ${RECEIVERCHECK_BIN:-} ]] || rm -f -- "$RECEIVERCHECK_BIN"
+  rmdir -- "$PRIVATE_TOOL_DIR" 2>/dev/null || true
+}
+
+build_private_tools() {
+  mkdir -p "$ROOT/runtime"
+  PRIVATE_TOOL_DIR=$(mktemp -d "$ROOT/runtime/.add-workspace.XXXXXX")
+  chmod 0700 "$PRIVATE_TOOL_DIR"
+  APPCTL_BIN="$PRIVATE_TOOL_DIR/appctl"
+  RECEIVERCHECK_BIN="$PRIVATE_TOOL_DIR/receivercheck"
+  trap cleanup_private_tools EXIT
+  (
+    cd "$ROOT"
+    go build -o "$APPCTL_BIN" ./cmd/appctl
+    go build -o "$RECEIVERCHECK_BIN" ./cmd/receivercheck
+  ) || fail "无法编译私有管理工具；请先执行 go build ./... 查看错误"
+  chmod 0700 "$APPCTL_BIN" "$RECEIVERCHECK_BIN"
 }
 
 ask_yes_no() {
@@ -49,6 +75,7 @@ require_existing_install() {
   [[ -f $ENV_FILE ]] || fail "没有找到 .env；请先运行 ./scripts/macos_native_setup.sh 完成原生初始化"
   [[ -f $CONFIG_FILE ]] || fail "没有找到 config.yaml；请先完成 macOS 原生初始化"
   [[ -f $APPCTL_MAIN ]] || fail "没有找到 cmd/appctl；当前安装不完整"
+  [[ -f $RECEIVERCHECK_MAIN ]] || fail "没有找到 cmd/receivercheck；当前安装不完整"
   [[ -x $CONTROLLER ]] || fail "没有找到可执行的 macos_bot_controller.sh；当前安装不完整"
   command -v go >/dev/null 2>&1 || fail "没有找到 Go；请先修复原生安装"
   command -v curl >/dev/null 2>&1 || fail "没有找到 curl；请先修复原生安装"
@@ -57,6 +84,7 @@ require_existing_install() {
   # .env is the existing native install's private runtime environment.
   # shellcheck disable=SC1090
   . "$ENV_FILE"
+  set +x
   set +a
 
   if [[ -n ${CODEX_HOME:-} && -f $CODEX_HOME/config.toml ]]; then
@@ -69,9 +97,10 @@ require_existing_install() {
     *) DEFAULT_EFFORT=high ;;
   esac
 
+  build_private_tools
   if ! APP_LIST=$(
     cd "$ROOT"
-    go run ./cmd/appctl list --config ./config.yaml
+    "$APPCTL_BIN" list --config ./config.yaml
   ); then
     fail "无法读取 MySQL 中的 App 列表；请先确认 MySQL 已启动、.env 和 config.yaml 正确"
   fi
@@ -102,7 +131,7 @@ refresh_app_list() {
   local refreshed
   if ! refreshed=$(
     cd "$ROOT"
-    go run ./cmd/appctl list --config ./config.yaml
+    "$APPCTL_BIN" list --config ./config.yaml
   ); then
     return 1
   fi
@@ -130,21 +159,29 @@ enabled_app_count() {
 
 strict_receivers_connected() {
   local expected_count=$1 attempts=${CODEX_WORKSPACE_BOT_ADD_READY_ATTEMPTS:-30}
-  local health ready states state_count connected_count
+  local health ready
   [[ $attempts =~ ^[1-9][0-9]*$ ]] || attempts=30
   while (( attempts > 0 )); do
-    health=$(curl --fail --silent --show-error http://127.0.0.1:8080/healthz 2>/dev/null || true)
-    ready=$(curl --fail --silent --show-error http://127.0.0.1:8080/readyz 2>/dev/null || true)
-    states=$(printf '%s\n' "$ready" | grep -Eo '"state"[[:space:]]*:[[:space:]]*"[^"]+"' || true)
-    state_count=$(printf '%s\n' "$states" | awk 'NF { count++ } END { print count+0 }')
-    connected_count=$(printf '%s\n' "$states" | grep -Ec '"connected"$' || true)
-    if [[ $health == ok && $ready == *'"receivers"'* && \
-      $state_count -eq $expected_count && $connected_count -eq $expected_count ]]; then
+    health=$(curl --fail --silent --show-error --connect-timeout 2 --max-time 5 http://127.0.0.1:8080/healthz 2>/dev/null || true)
+    ready=$(curl --fail --silent --show-error --connect-timeout 2 --max-time 5 http://127.0.0.1:8080/readyz 2>/dev/null || true)
+    if [[ $health == ok ]] && printf '%s' "$ready" | "$RECEIVERCHECK_BIN" --expected "$expected_count" >/dev/null 2>&1; then
       return 0
     fi
     attempts=$((attempts - 1))
     (( attempts > 0 )) && sleep 1
   done
+  return 1
+}
+
+dangerous_workspace() {
+  local path=$1
+  case "$path" in
+    /|"$HOME"|"$HOME"/.ssh|"$HOME"/.ssh/*|"$HOME"/.codex|"$HOME"/.codex/*|\
+      /System|/System/*|/Library|/Library/*|/Applications|/Applications/*|\
+      /usr|/usr/*|/bin|/bin/*|/sbin|/sbin/*|/etc|/etc/*|/var|/var/*|/private|/private/*)
+      return 0
+      ;;
+  esac
   return 1
 }
 
@@ -160,8 +197,10 @@ add_one_workspace() {
   if LC_ALL=C printf '%s' "$workspace_dir" | grep -q '[[:cntrl:]]'; then
     fail "Workspace 路径不能包含 tab、回车或其他控制字符"
   fi
+  dangerous_workspace "$workspace_dir" && fail "Workspace 不能使用 HOME、HOME 下的密钥目录、根目录或系统危险目录：$workspace_dir"
   [[ -d $workspace_dir ]] || fail "Workspace 目录不存在：$workspace_dir"
   workspace_dir=$(cd -- "$workspace_dir" && pwd -P)
+  dangerous_workspace "$workspace_dir" && fail "Workspace 解析后指向危险目录：$workspace_dir"
 
   read -r -p '飞书 App ID（cli_ 开头）：' app_id || fail "输入已结束"
   [[ $app_id =~ ^cli_[A-Za-z0-9]+$ ]] || fail "飞书 App ID 格式不正确，应为 cli_ 开头并只包含字母和数字"
@@ -195,22 +234,20 @@ add_one_workspace() {
     return "$CANCEL_STATUS"
   fi
 
-  export CODEX_WORKSPACE_BOT_NEW_APP_SECRET="$app_secret"
-  unset app_secret
   create_status=0
-  (
+  printf '%s' "$app_secret" | (
     cd "$ROOT"
-    go run ./cmd/appctl create \
+    "$APPCTL_BIN" create \
       --config ./config.yaml \
       --name "$app_name" \
       --app-id "$app_id" \
-      --secret-env CODEX_WORKSPACE_BOT_NEW_APP_SECRET \
+      --secret-stdin \
       --workspace-dir "$workspace_dir" \
       --model "$model" \
       --effort "$effort" \
       --enabled=true
   ) || create_status=$?
-  unset CODEX_WORKSPACE_BOT_NEW_APP_SECRET
+  unset app_secret
 
   if (( create_status != 0 )); then
     printf '添加 Workspace：appctl 登记失败；Bot 没有重启，原有 App 继续运行。\n' >&2
@@ -228,8 +265,11 @@ add_one_workspace() {
     cd "$ROOT"
     ./macos_bot_controller.sh restart
   ); then
-    printf '添加 Workspace：已登记但未生效。数据库记录已保留，没有伪装回滚。\n' >&2
-    printf '请排除问题后进入 %s 并执行：./macos_bot_controller.sh restart\n' "$ROOT" >&2
+    printf '添加 Workspace：已登记但未生效，当前服务状态未知。数据库记录已保留，没有伪装回滚。\n' >&2
+    printf '请进入 %s 后依次检查或重试：\n' "$ROOT" >&2
+    printf '  ./macos_bot_controller.sh status\n' >&2
+    printf '  ./macos_bot_controller.sh logs\n' >&2
+    printf '  ./macos_bot_controller.sh restart\n' >&2
     return 1
   fi
 

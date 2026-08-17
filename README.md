@@ -146,15 +146,17 @@ macOS 用户不需要 Ubuntu、Multipass 或 Docker。先完成 Codex 登录和�
 4. 创建一个 Bot App 配置：
 
    ```bash
+   mkdir -p ./runtime
+   go build -o ./runtime/appctl ./cmd/appctl
+   set +x
    printf 'Feishu App Secret（输入时不显示）：'
    read -r -s AIPM_FEISHU_APP_SECRET
    printf '\n'
-   export AIPM_FEISHU_APP_SECRET
-   go run ./cmd/appctl create \
+   printf '%s' "$AIPM_FEISHU_APP_SECRET" | ./runtime/appctl create \
      --config ./config.yaml \
      --name my-bot \
      --app-id cli_xxx \
-     --secret-env AIPM_FEISHU_APP_SECRET \
+     --secret-stdin \
      --workspace-dir /absolute/path/to/workspace \
      --model gpt-5 \
      --effort medium \
@@ -219,7 +221,7 @@ macOS 原生安装完成后，推荐用交互脚本继续添加 Workspace：
 ./scripts/macos_native_add_workspace.sh
 ```
 
-它会检查现有 `.env`、`config.yaml`、Go、`appctl` 和 MySQL，隐藏读取 App Secret，防止重复名称或重复 App ID 覆盖旧配置，并在写入后回读核对，再通过 `./macos_bot_controller.sh restart` 刷新 receiver。模型与 reasoning effort 默认沿用现有 `$CODEX_HOME/config.toml`。脚本还会等待 `/readyz` 中的 receiver 数量与全部 enabled App 一致、且每个状态都是 `connected`，之后才会提示生效。新 App 会立即启用，一次可以连续添加多个 Workspace。
+它会检查现有 `.env`、`config.yaml`、Go、`appctl` 和 MySQL，隐藏读取 App Secret，并用 stdin 交给临时编译的私有 `appctl` 二进制。`create` 是数据库原子 INSERT，不会因为 list/create 之间的竞态覆盖旧配置；写入后还会回读核对，再通过 `./macos_bot_controller.sh restart` 刷新 receiver。模型与 reasoning effort 默认沿用现有 `$CODEX_HOME/config.toml`。脚本会用结构化 JSON 校验等待 `/readyz` 中的 receiver 数量与全部 enabled App 一致、且每个状态都是 `connected`，之后才会提示生效。新 App 会立即启用，一次可以连续添加多个 Workspace。
 
 **一个飞书 App ID 只能绑定一个 Workspace。** 如果需要多个 Workspace，必须在飞书开放平台分别创建多个独立的企业自建应用，每个应用使用各自的 App ID 和 App Secret。
 
@@ -227,13 +229,15 @@ macOS 原生安装完成后，推荐用交互脚本继续添加 Workspace：
 go run ./cmd/appctl list --config ./config.yaml
 go run ./cmd/appctl enable --config ./config.yaml --name my-bot
 go run ./cmd/appctl disable --config ./config.yaml --name my-bot
-printf 'Feishu App Secret（输入时不显示）：'; read -r -s AIPM_FEISHU_APP_SECRET; printf '\n'; export AIPM_FEISHU_APP_SECRET
-go run ./cmd/appctl update --config ./config.yaml --name my-bot --app-id cli_xxx --secret-env AIPM_FEISHU_APP_SECRET --workspace-dir /abs/ws --model gpt-5 --effort medium
+mkdir -p ./runtime
+go build -o ./runtime/appctl ./cmd/appctl
+set +x; printf 'Feishu App Secret（输入时不显示）：'; read -r -s AIPM_FEISHU_APP_SECRET; printf '\n'
+printf '%s' "$AIPM_FEISHU_APP_SECRET" | ./runtime/appctl update --config ./config.yaml --name my-bot --app-id cli_xxx --secret-stdin --workspace-dir /abs/ws --model gpt-5 --effort medium
 unset AIPM_FEISHU_APP_SECRET
 go run ./cmd/appctl delete --config ./config.yaml --name my-bot
 ```
 
-`list` 不会输出 App Secret。修改 App 配置后，重启服务使 receiver 配置生效。
+`create` 只允许新增，重复名称或 App ID 会失败；`update` 只允许修改已存在的名称；仅首次安装的幂等初始化使用显式 `upsert`。`list` 不会输出 App Secret。修改 App 配置后，重启服务使 receiver 配置生效。
 
 ## 定时任务
 
