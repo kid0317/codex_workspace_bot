@@ -28,9 +28,11 @@ try {
     $backupDir = Join-Path $PSScriptRoot ("system\backups\" + (Get-Date).ToUniversalTime().ToString("yyyyMMddTHHmmssZ"))
     New-Item -ItemType Directory -Path $backupDir -Force | Out-Null
     Copy-Item (Join-Path $PSScriptRoot ".env"), (Join-Path $PSScriptRoot "space.lock.json"), $manifestPath -Destination $backupDir
-    Invoke-Compose up -d mysql
-    & docker compose --project-directory $PSScriptRoot -f (Join-Path $PSScriptRoot "compose.yaml") exec -T mysql sh -c 'MYSQL_PWD="$MYSQL_PASSWORD" mysqldump -u"$MYSQL_USER" "$MYSQL_DATABASE"' | Set-Content -Encoding utf8 (Join-Path $backupDir "mysql.sql")
-    if ($LASTEXITCODE -ne 0) { throw "数据库备份失败。" }
+    Invoke-Compose up -d --wait mysql
+    $backupPath = Join-Path $backupDir "mysql.sql"
+    & docker compose --project-directory $PSScriptRoot -f (Join-Path $PSScriptRoot "compose.yaml") exec -T mysql sh -c 'MYSQL_PWD="$MYSQL_PASSWORD" mysqldump --no-tablespaces -u"$MYSQL_USER" "$MYSQL_DATABASE"' | Set-Content -Encoding utf8 $backupPath
+    if ($LASTEXITCODE -ne 0 -or -not (Test-Path $backupPath) -or (Get-Item $backupPath).Length -eq 0) { throw "数据库备份失败。" }
+    Protect-CurrentUserFile $backupPath
 
     $envPath = Join-Path $PSScriptRoot ".env"
     $oldEnv = Get-Content $envPath -Raw
@@ -57,4 +59,3 @@ try {
     Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath $lockDir -Force -ErrorAction SilentlyContinue
 }
-

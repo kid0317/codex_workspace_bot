@@ -13,6 +13,15 @@ function Invoke-Compose {
     if ($LASTEXITCODE -ne 0) { throw "Docker Compose 命令失败。" }
 }
 
+function Protect-CurrentUserFile([string]$Path) {
+    $identity = [Security.Principal.WindowsIdentity]::GetCurrent().User
+    $acl = New-Object Security.AccessControl.FileSecurity
+    $acl.SetOwner($identity)
+    $acl.SetAccessRuleProtection($true, $false)
+    $acl.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule($identity, "FullControl", "Allow")))
+    Set-Acl -LiteralPath $Path -AclObject $acl
+}
+
 function Wait-BotReady([int]$TimeoutSeconds = 180) {
     $portLine = Get-Content (Join-Path $script:SpaceRoot ".env") | Where-Object { $_ -like "BOT_HOST_PORT=*" } | Select-Object -First 1
     $port = $portLine.Split("=", 2)[1]
@@ -25,4 +34,3 @@ function Wait-BotReady([int]$TimeoutSeconds = 180) {
     }
     return $false
 }
-
