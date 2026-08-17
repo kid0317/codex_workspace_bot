@@ -98,4 +98,36 @@ if rg -q 'dashscope\.aliyuncs\.com/api/v2/apps' "$deploy_dir"; then
   exit 1
 fi
 
+# Run the Linux installer with a fake Docker CLI and prove that every generated
+# Bot encryption key matches the runtime contract: standard Base64 for exactly
+# 32 decoded bytes. This catches installers that accidentally emit hex strings.
+fake_bin="$(mktemp -d)"
+fake_space="$(mktemp -d)"
+cleanup_installer_probe() { rm -rf "$fake_bin" "$fake_space"; }
+trap cleanup_installer_probe EXIT INT TERM
+cat > "$fake_bin/docker" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+chmod +x "$fake_bin/docker"
+printf '%s\n' \
+  "$fake_space" \
+  '1' \
+  '' \
+  '' \
+  'contract-test-provider-key' \
+  '18089' \
+  'n' \
+  'n' | PATH="$fake_bin:$PATH" bash "$deploy_dir/install.sh" >/dev/null
+for key_name in CODEX_WORKSPACE_BOT_ATTACHMENT_KEY_V1 CODEX_WORKSPACE_BOT_ACTION_RESULT_KEY_V1; do
+  encoded="$(sed -n "s/^${key_name}=//p" "$fake_space/.secrets/bot.env")"
+  decoded_bytes="$(printf '%s' "$encoded" | base64 --decode 2>/dev/null | wc -c)"
+  if [[ "$decoded_bytes" -ne 32 ]]; then
+    echo "$key_name must decode from Base64 to exactly 32 bytes; got $decoded_bytes" >&2
+    exit 1
+  fi
+done
+cleanup_installer_probe
+trap - EXIT INT TERM
+
 echo "docker release contract: PASS"
