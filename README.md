@@ -213,6 +213,16 @@ macOS 使用对应的原生控制器：
 
 ## App 管理
 
+macOS 原生安装完成后，推荐用交互脚本继续添加 Workspace：
+
+```bash
+./scripts/macos_native_add_workspace.sh
+```
+
+它会检查现有 `.env`、`config.yaml`、Go、`appctl` 和 MySQL，隐藏读取 App Secret，防止重复名称或重复 App ID 覆盖旧配置，并在写入后回读核对，再通过 `./macos_bot_controller.sh restart` 刷新 receiver。模型与 reasoning effort 默认沿用现有 `$CODEX_HOME/config.toml`。脚本还会等待 `/readyz` 中的 receiver 数量与全部 enabled App 一致、且每个状态都是 `connected`，之后才会提示生效。新 App 会立即启用，一次可以连续添加多个 Workspace。
+
+**一个飞书 App ID 只能绑定一个 Workspace。** 如果需要多个 Workspace，必须在飞书开放平台分别创建多个独立的企业自建应用，每个应用使用各自的 App ID 和 App Secret。
+
 ```bash
 go run ./cmd/appctl list --config ./config.yaml
 go run ./cmd/appctl enable --config ./config.yaml --name my-bot
