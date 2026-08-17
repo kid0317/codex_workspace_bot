@@ -22,6 +22,7 @@ if rg -n -- '--secret[[:space:]]+"?\$' "$SETUP" >/dev/null; then
   fail "setup must not pass the Feishu secret as a command-line argument"
 fi
 rg -q -- '--secret-env' "$SETUP" || fail "setup must pass the Feishu secret through appctl --secret-env"
+rg -q -- 'appctl upsert' "$SETUP" || fail "idempotent first-time setup must use explicit appctl upsert"
 
 tmp_dir=$(mktemp -d)
 trap 'rm -rf "$tmp_dir"' EXIT

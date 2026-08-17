@@ -14,12 +14,14 @@
 - 入口只服务已完成 `scripts/macos_native_setup.sh` 的安装，不负责安装依赖、创建 MySQL 或首次启动。
 - 复用 `go run ./cmd/appctl list/create --config ./config.yaml` 访问 MySQL；不直接执行 SQL。
 - `create` 前读取不含 Secret 的 TSV 列表，分别检查名称和飞书 App ID。当前 `create` 是 upsert，因此这一步是防止覆盖已有 App 的必要关卡。
+- `appctl create` 必须使用数据库原子 INSERT-only；即使另一个管理员恰好在 list 与 create 之间登记同名或同 App ID，create 也失败且不覆盖。`update` 只更新已存在名称；首次安装若需幂等行为显式使用 `upsert`。
 - App Secret 只通过临时环境变量和 `--secret-env` 传给 `appctl`，函数返回前清理。
 - 入口先关闭 xtrace；Workspace 必须是存在的绝对目录，且不得含 tab、回车等会破坏 TSV 回读的控制字符。
 - 模型和 effort 默认继承现有 `$CODEX_HOME/config.toml`，读不到时回退为 `gpt-5.6-terra/high`。
 - 新增 App 固定为启用状态；当前 `appctl` 的 upsert 不支持可靠地创建 disabled App，因此不提供会误导用户的禁用选项。
 - `create` 成功后再次执行 `list`，精确回读名称、App ID、Workspace 和 enabled 状态；只有回读一致才调用 `./macos_bot_controller.sh restart` 刷新 receiver，不直接启动进程。
 - controller 返回成功后仍要做严格激活回读：`/healthz=ok`，`/readyz` 的 receiver 数等于 enabled App 数，且每个 state 都严格为 `connected`。`connecting`、`reconnecting`、`failed`、空列表或数量不足都继续等待，超时则判定未生效。
+- readiness 使用 Go JSON 解析器只检查顶层 `receivers` 对象，其他位置恰好出现的 `state` 不参与计数；curl 必须设置连接与总时限。本轮仍使用当前原生默认的 `127.0.0.1:8080`，非默认 `server.listen_addr` 是待真实安装验证的显式边界。
 
 ## 场景验收
 
