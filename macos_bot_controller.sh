@@ -69,7 +69,8 @@ build() {
   go build -o "$temporary_dotenv" ./cmd/safedotenv
   go build -o "$temporary_receiver" ./cmd/receivercheck
   go build -o "$temporary_appctl" ./cmd/appctl
-  chmod 0755 "$temporary_server" 0700 "$temporary_dotenv" "$temporary_receiver" "$temporary_appctl"
+  chmod 0755 "$temporary_server"
+  chmod 0700 "$temporary_dotenv" "$temporary_receiver" "$temporary_appctl"
   mv -f "$temporary_server" "$BINARY"
   mv -f "$temporary_dotenv" "$SAFEDOTENV_BINARY"
   mv -f "$temporary_receiver" "$RECEIVERCHECK_BINARY"

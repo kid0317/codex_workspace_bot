@@ -74,7 +74,11 @@ for binary in codex_workspace_bot safedotenv receivercheck appctl; do
   [[ -f $build_fixture/runtime/$binary ]] || fail "controller build did not create runtime/$binary"
 done
 file_mode() {
-  stat -f '%Lp' "$1" 2>/dev/null || stat -c '%a' "$1"
+  if [[ $(uname -s) == Darwin ]]; then
+    stat -f '%Lp' "$1"
+  else
+    stat -c '%a' "$1"
+  fi
 }
 [[ $(file_mode "$build_fixture/runtime/codex_workspace_bot") == 755 ]] || fail "server build mode must be 0755"
 for helper in safedotenv receivercheck appctl; do
