@@ -383,7 +383,9 @@ func (a *Attempt) MarkSessionUsageIncomplete() {
 }
 
 func (a *Attempt) MarkSessionUsageSnapshotFallback() {
-	if a == nil || a.span == nil { return }
+	if a == nil || a.span == nil {
+		return
+	}
 	a.span.SetAttributes(attribute.String("langfuse.observation.metadata.session_usage_source", "thread_token_usage_snapshot"))
 	a.rootSpan.SetAttributes(attribute.String("langfuse.trace.metadata.session_usage_source", "thread_token_usage_snapshot"))
 }

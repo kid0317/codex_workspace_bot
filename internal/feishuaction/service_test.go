@@ -149,16 +149,16 @@ func TestReadMarkdownFileAllowsAnyLocalRegularPathAndRejectsInvalidUTF8(t *testi
 }
 
 type fakeClient struct {
-	target  worker.ReplyTarget
-	owner   string
-	text    string
-	files   int
-	docs    int
-	docID   string
-	docText string
+	target     worker.ReplyTarget
+	owner      string
+	text       string
+	files      int
+	docs       int
+	docID      string
+	docText    string
 	docOutcome worker.DocumentOutcome
-	textErr error
-	calls   int
+	textErr    error
+	calls      int
 }
 
 func (f *fakeClient) SendCurrentText(_ context.Context, target worker.ReplyTarget, text string) (string, error) {

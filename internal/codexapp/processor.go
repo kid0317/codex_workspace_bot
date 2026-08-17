@@ -394,7 +394,15 @@ func (p Processor) startGoal(ctx context.Context, batch worker.Batch, threadID, 
 	turns := append([]TurnCompleted(nil), completedTurns...)
 	completedMu.Unlock()
 	anyMissingUsage, usedSnapshotFallback := len(turns) == 0, false
-	for _, completed := range turns { if completed.Usage == nil && completed.SnapshotUsage == nil { anyMissingUsage = true; break }; if completed.Usage == nil && completed.SnapshotUsage != nil { usedSnapshotFallback = true } }
+	for _, completed := range turns {
+		if completed.Usage == nil && completed.SnapshotUsage == nil {
+			anyMissingUsage = true
+			break
+		}
+		if completed.Usage == nil && completed.SnapshotUsage != nil {
+			usedSnapshotFallback = true
+		}
+	}
 	if sessionTotal, usageErr := p.recordCompletedUsage(ctx, batch, turns); usageErr != nil {
 		if err == nil {
 			err = usageErr
@@ -404,7 +412,9 @@ func (p Processor) startGoal(ctx context.Context, batch worker.Batch, threadID, 
 		if anyMissingUsage {
 			observation.MarkSessionUsageIncomplete()
 		}
-		if usedSnapshotFallback { observation.MarkSessionUsageSnapshotFallback() }
+		if usedSnapshotFallback {
+			observation.MarkSessionUsageSnapshotFallback()
+		}
 	}
 	if observation != nil {
 		observation.End(nil, err)
@@ -462,7 +472,15 @@ func (p Processor) startTurn(ctx context.Context, batch worker.Batch, threadID s
 	turns := append([]TurnCompleted(nil), completedTurns...)
 	completedMu.Unlock()
 	anyMissingUsage, usedSnapshotFallback := len(turns) == 0, false
-	for _, completed := range turns { if completed.Usage == nil && completed.SnapshotUsage == nil { anyMissingUsage = true; break }; if completed.Usage == nil && completed.SnapshotUsage != nil { usedSnapshotFallback = true } }
+	for _, completed := range turns {
+		if completed.Usage == nil && completed.SnapshotUsage == nil {
+			anyMissingUsage = true
+			break
+		}
+		if completed.Usage == nil && completed.SnapshotUsage != nil {
+			usedSnapshotFallback = true
+		}
+	}
 	if sessionTotal, usageErr := p.recordCompletedUsage(ctx, batch, turns); usageErr != nil {
 		if err == nil {
 			err = usageErr
@@ -472,7 +490,9 @@ func (p Processor) startTurn(ctx context.Context, batch worker.Batch, threadID s
 		if anyMissingUsage {
 			observation.MarkSessionUsageIncomplete()
 		}
-		if usedSnapshotFallback { observation.MarkSessionUsageSnapshotFallback() }
+		if usedSnapshotFallback {
+			observation.MarkSessionUsageSnapshotFallback()
+		}
 	}
 	if observation != nil {
 		observation.End(scheduledFinal, err)
