@@ -33,3 +33,14 @@ space_id() {
   sed -n 's/.*"space_id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$space_root/space.lock.json" | head -n 1
 }
 
+sha256_file() {
+  local target="${1:?sha256_file requires a file path}"
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$target" | awk '{print $1}'
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$target" | awk '{print $1}'
+  else
+    echo "找不到 SHA-256 校验工具。macOS 需要 shasum，Linux 需要 sha256sum。" >&2
+    return 1
+  fi
+}

@@ -136,6 +136,20 @@ if rg -q 'dashscope\.aliyuncs\.com/api/v2/apps' "$deploy_dir"; then
   exit 1
 fi
 
+# macOS ships shasum instead of GNU sha256sum. Prove that the shared helper
+# can verify the release manifest when only the macOS-style command is visible.
+checksum_bin="$(mktemp -d)"
+ln -s "$(command -v shasum)" "$checksum_bin/shasum"
+ln -s "$(command -v awk)" "$checksum_bin/awk"
+source "$deploy_dir/templates/lib.sh"
+fallback_hash="$(PATH="$checksum_bin" sha256_file "$deploy_dir/release/release-manifest.json")"
+expected_hash="$(awk '{print $1}' "$deploy_dir/release/release-manifest.json.sha256")"
+rm -rf "$checksum_bin"
+if [[ "$fallback_hash" != "$expected_hash" ]]; then
+  echo "macOS shasum fallback produced the wrong release manifest hash" >&2
+  exit 1
+fi
+
 # Run the Linux installer with a fake Docker CLI and prove that every generated
 # Bot encryption key matches the runtime contract: standard Base64 for exactly
 # 32 decoded bytes. This catches installers that accidentally emit hex strings.

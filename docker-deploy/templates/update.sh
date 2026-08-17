@@ -26,16 +26,15 @@ manifest="$tmp_dir/release-manifest.json"
 if [[ "$manifest_source" =~ ^https?:// ]]; then
   curl --fail --location --silent --show-error "$manifest_source" -o "$manifest"
   curl --fail --location --silent --show-error "${manifest_source}.sha256" -o "$manifest.sha256"
-  (cd "$tmp_dir" && sha256sum -c release-manifest.json.sha256)
 else
   cp "$manifest_source" "$manifest"
   checksum_source="${manifest_source}.sha256"
   test -f "$checksum_source" || { echo "缺少校验文件：$checksum_source" >&2; exit 1; }
   cp "$checksum_source" "$manifest.sha256"
-  expected="$(awk '{print $1}' "$manifest.sha256")"
-  actual="$(sha256sum "$manifest" | awk '{print $1}')"
-  test "$expected" = "$actual" || { echo "发行清单校验失败。" >&2; exit 1; }
 fi
+expected="$(awk '{print $1}' "$manifest.sha256")"
+actual="$(sha256_file "$manifest")"
+test "$expected" = "$actual" || { echo "发行清单校验失败。" >&2; exit 1; }
 
 version="$(jq -er '.version' "$manifest")"
 image="$(jq -er '.image.repository' "$manifest")"
