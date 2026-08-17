@@ -37,6 +37,50 @@ done <<<"$curl_lines"
 
 test_tmp=$(mktemp -d)
 trap 'rm -rf "$test_tmp"' EXIT
+
+build_fixture="$test_tmp/build-fixture"
+mkdir -p "$build_fixture/bin" "$build_fixture/runtime" "$build_fixture/home"
+cp "$CONTROLLER" "$build_fixture/macos_bot_controller.sh"
+chmod +x "$build_fixture/macos_bot_controller.sh"
+cat >"$build_fixture/bin/uname" <<'EOF'
+#!/usr/bin/env bash
+printf 'Darwin\n'
+EOF
+cat >"$build_fixture/bin/go" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+[[ ${1:-} == build ]] || exit 80
+output=
+previous=
+for argument in "$@"; do
+  [[ $previous != -o ]] || output=$argument
+  previous=$argument
+done
+[[ -n $output ]] || exit 81
+printf '%s\n' '#!/usr/bin/env bash' 'exit 0' >"$output"
+EOF
+chmod +x "$build_fixture/bin/uname" "$build_fixture/bin/go"
+
+set +e
+HOME="$build_fixture/home" PATH="$build_fixture/bin:/usr/bin:/bin" \
+  "$build_fixture/macos_bot_controller.sh" build >"$build_fixture/build.out" 2>"$build_fixture/build.err"
+build_status=$?
+set -e
+if [[ $build_status -ne 0 ]]; then
+  sed -n '1,120p' "$build_fixture/build.err" >&2
+  fail "controller build failed with status $build_status"
+fi
+for binary in codex_workspace_bot safedotenv receivercheck appctl; do
+  [[ -f $build_fixture/runtime/$binary ]] || fail "controller build did not create runtime/$binary"
+done
+file_mode() {
+  stat -f '%Lp' "$1" 2>/dev/null || stat -c '%a' "$1"
+}
+[[ $(file_mode "$build_fixture/runtime/codex_workspace_bot") == 755 ]] || fail "server build mode must be 0755"
+for helper in safedotenv receivercheck appctl; do
+  [[ $(file_mode "$build_fixture/runtime/$helper") == 700 ]] || fail "$helper build mode must be 0700"
+done
+
 fixture="$test_tmp/fixture"
 mkdir -p "$fixture/runtime" "$fixture/bin" "$fixture/home/Library/LaunchAgents"
 cp "$CONTROLLER" "$fixture/macos_bot_controller.sh"
