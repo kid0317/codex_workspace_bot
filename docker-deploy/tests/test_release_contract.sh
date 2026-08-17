@@ -75,6 +75,8 @@ fi
 grep -Fq 'https://dashscope.aliyuncs.com/compatible-mode/v1' "$deploy_dir/install.sh"
 grep -Fq 'https://dashscope.aliyuncs.com/compatible-mode/v1' "$deploy_dir/install.ps1"
 grep -Fq 'SetAccessRuleProtection($true, $false)' "$deploy_dir/install.ps1"
+grep -Fq '$attachmentKey = New-RandomBase64' "$deploy_dir/install.ps1"
+grep -Fq '$actionKey = New-RandomBase64' "$deploy_dir/install.ps1"
 grep -Fq '已经通过匿名拉取验证' "$deploy_dir/install.sh"
 grep -Fq '已经通过匿名拉取验证' "$deploy_dir/install.ps1"
 if rg -q '(Public.*要求登录|不支持匿名拉取)' "$deploy_dir/install.sh" "$deploy_dir/install.ps1"; then
