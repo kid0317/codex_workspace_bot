@@ -6,6 +6,20 @@ ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 ENV_FILE="$ROOT/.env"
 CONFIG_FILE="$ROOT/config.yaml"
 CONFIG_TEMPLATE="$ROOT/config.yaml.template"
+SAFEDOTENV_MAIN="$ROOT/cmd/safedotenv/main.go"
+APPCTL_MAIN="$ROOT/cmd/appctl/main.go"
+PRIVATE_TOOL_DIR=
+SAFEDOTENV_BIN=
+APPCTL_BIN=
+MYSQL_AUTH_FILE=
+
+cleanup() {
+  [[ -z ${MYSQL_AUTH_FILE:-} ]] || rm -f -- "$MYSQL_AUTH_FILE"
+  [[ -z ${APPCTL_BIN:-} ]] || rm -f -- "$APPCTL_BIN"
+  [[ -z ${SAFEDOTENV_BIN:-} ]] || rm -f -- "$SAFEDOTENV_BIN"
+  [[ -z ${PRIVATE_TOOL_DIR:-} ]] || rmdir -- "$PRIVATE_TOOL_DIR" 2>/dev/null || true
+}
+trap cleanup EXIT
 
 usage() {
   cat <<'EOF'
@@ -24,6 +38,26 @@ EOF
 fail() {
   printf 'macos_native_setup: %s\n' "$*" >&2
   exit 1
+}
+
+build_private_tools() {
+  [[ -f $SAFEDOTENV_MAIN && -f $APPCTL_MAIN ]] || fail "缺少 cmd/safedotenv 或 cmd/appctl"
+  mkdir -p "$ROOT/runtime"
+  PRIVATE_TOOL_DIR=$(mktemp -d "$ROOT/runtime/.native-setup.XXXXXX")
+  chmod 0700 "$PRIVATE_TOOL_DIR"
+  SAFEDOTENV_BIN="$PRIVATE_TOOL_DIR/safedotenv"
+  APPCTL_BIN="$PRIVATE_TOOL_DIR/appctl"
+  (
+    cd "$ROOT"
+    go build -o "$SAFEDOTENV_BIN" ./cmd/safedotenv
+    go build -o "$APPCTL_BIN" ./cmd/appctl
+  ) || fail "无法编译私有初始化工具"
+  chmod 0700 "$SAFEDOTENV_BIN" "$APPCTL_BIN"
+}
+
+validate_existing_dotenv() {
+  [[ ! -f $ENV_FILE ]] || "$SAFEDOTENV_BIN" validate --file "$ENV_FILE" ||
+    fail ".env 包含不受支持或可能执行的内容；为安全起见没有读取或修改"
 }
 
 require_macos() {
@@ -197,11 +231,7 @@ SQL
 existing_or_random() {
   local name=$1 kind=$2 current=
   if [[ -f $ENV_FILE ]]; then
-    set -a
-    . "$ENV_FILE"
-    set +x
-    set +a
-    eval "current=\${$name:-}"
+    current=$("$SAFEDOTENV_BIN" get --file "$ENV_FILE" --key "$name" --allow-missing)
   fi
   if [[ -n $current ]]; then
     printf '%s' "$current"
@@ -262,24 +292,24 @@ register_app() {
   read -r -p "推理强度 [$effort]：" chosen_effort
   effort=${chosen_effort:-$effort}
 
-  set -a
-  . "$ENV_FILE"
-  set +x
-  set +a
-  export AIPM_FEISHU_APP_SECRET="$app_secret"
-  (
+  # appctl upsert is intentionally explicit: first-time setup remains idempotent.
+  local register_status=0
+  printf '%s' "$app_secret" | (
     cd "$ROOT"
-    go run ./cmd/appctl upsert \
+    "$SAFEDOTENV_BIN" exec --file "$ENV_FILE" -- "$APPCTL_BIN" upsert \
       --config ./config.yaml \
       --name "$app_name" \
       --app-id "$app_id" \
-      --secret-env AIPM_FEISHU_APP_SECRET \
+      --secret-stdin \
       --workspace-dir "$workspace_dir" \
       --model "$model" \
       --effort "$effort" \
       --enabled=true
-  )
-  unset AIPM_FEISHU_APP_SECRET app_secret
+  ) || register_status=$?
+  unset app_secret
+  if (( register_status != 0 )); then
+    fail "飞书 App 与 Workspace 登记失败"
+  fi
   printf '飞书 App 与 Workspace 已写入本机 MySQL。\n'
 }
 
@@ -312,6 +342,8 @@ configure_mainland_network_defaults
 printf '\n=== Codex Workspace Bot：macOS 原生初始化 ===\n'
 printf '已启用国内网络默认配置：Homebrew 清华镜像（跳过自动更新），Go goproxy.cn。\n'
 ensure_dependencies
+build_private_tools
+validate_existing_dotenv
 mysql_paths
 start_mysql
 
@@ -328,8 +360,6 @@ runtime_home=$(canonical_dir "$user_dir/.codex-runtime/home")
 [[ -f $runtime_home/config.toml ]] || fail "没有找到 $runtime_home/config.toml，请先完成教程第 3 步"
 
 db_password=$(existing_or_random CODEX_WORKSPACE_BOT_DB_PASSWORD hex)
-MYSQL_AUTH_FILE=
-trap '[[ -n ${MYSQL_AUTH_FILE:-} ]] && rm -f "$MYSQL_AUTH_FILE"' EXIT
 mysql_root_args
 initialize_database "$db_password"
 write_runtime_environment "$workspace_dir" "$user_dir" "$runtime_home" "$db_password"

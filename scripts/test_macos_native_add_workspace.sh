@@ -81,10 +81,14 @@ case "$command_name" in
       [[ -z ${FAKE_APP_LIST:-} ]] || printf '%b' "$FAKE_APP_LIST" >"$FAKE_STATE"
       : >"$FAKE_STATE.initialized"
     fi
-    [[ ! -f $FAKE_STATE ]] || cat "$FAKE_STATE"
+    [[ ! -f $FAKE_STATE ]] || awk -F '\t' 'BEGIN { OFS="\t" } { print $1, $2, $3, $4 }' "$FAKE_STATE"
     ;;
   create)
     printf 'CREATE %s\n' "$*" >>"${FAKE_CALLS:?}"
+    create_call=0
+    [[ ! -f ${FAKE_CREATE_COUNTER:?} ]] || read -r create_call <"$FAKE_CREATE_COUNTER"
+    create_call=$((create_call + 1))
+    printf '%s\n' "$create_call" >"$FAKE_CREATE_COUNTER"
     secret_stdin=false
     app_name=
     app_id=
@@ -113,6 +117,9 @@ case "$command_name" in
       exit 96
     fi
     unset secret_value
+    if [[ ${FAKE_CREATE_FAIL_ON:-0} -eq $create_call ]]; then
+      exit "${FAKE_CREATE_FAIL_STATUS:-19}"
+    fi
     if [[ ${FAKE_CREATE_RACE:-0} -eq 1 ]]; then
       printf '%s\t%s\t%s\ttrue\t%s\n' "$app_name" "cli_competing" "/competing/workspace" "internal-$app_name" >>"${FAKE_STATE:?}"
       exit 17
@@ -149,7 +156,7 @@ payload=$(cat)
 printf 'RECEIVERCHECK %s\n' "$*" >>"${FAKE_CALLS:?}"
 [[ -n $expected_ids ]] || exit 81
 IFS=, read -r -a ids <<<"$expected_ids"
-[[ $(printf '%s\n' "$payload" | grep -Ec '"state":"connected"') -eq ${#ids[@]} ]] || exit 1
+[[ $(printf '%s\n' "$payload" | grep -Eo '"state":"connected"' | wc -l | tr -d ' ') -eq ${#ids[@]} ]] || exit 1
 for id in "${ids[@]}"; do
   [[ $payload == *\"$id\":\{\"state\":\"connected\"\}* ]] || exit 1
 done
@@ -197,9 +204,8 @@ case "$command_name" in
     exit 0
     ;;
   exec)
-    child_env=("HOME=$HOME" "PATH=$PATH")
-    for ((i=0; i<${#DOTENV_NAMES[@]}; i++)); do child_env+=("${DOTENV_NAMES[i]}=${DOTENV_VALUES[i]}"); done
-    exec env -i "${child_env[@]}" "$@"
+    for ((i=0; i<${#DOTENV_NAMES[@]}; i++)); do export "${DOTENV_NAMES[i]}=${DOTENV_VALUES[i]}"; done
+    exec "$@"
     ;;
   *) exit 64 ;;
 esac
@@ -284,6 +290,7 @@ run_fixture() {
     FAKE_STATE="$fixture/apps.tsv" \
     FAKE_LIST_COUNTER="$fixture/list-counter" \
     FAKE_READY_COUNTER="$fixture/ready-counter" \
+    FAKE_CREATE_COUNTER="$fixture/create-counter" \
     "$@" \
     "$fixture/root/scripts/macos_native_add_workspace.sh" \
     >"$fixture/stdout" 2>"$fixture/stderr"
@@ -360,12 +367,27 @@ assert_contains "$fixture/calls.log" '--effort high'
 fixture="$TEST_TMP/two"
 new_fixture "$fixture"
 run_fixture "$fixture" "first-app\n$fixture/root/workspace-one\ncli_first123\nfirst-secret\ngpt-5.6-sol\nhigh\ny\ny\nsecond-app\n$fixture/root/workspace-two\ncli_second456\nsecond-secret\ngpt-5.6-terra\nmedium\ny\nn\n"
-[[ $RUN_STATUS -eq 0 ]] || fail "continuous add failed with status $RUN_STATUS"
+if [[ $RUN_STATUS -ne 0 ]]; then
+  sed -n '1,200p' "$fixture/stdout" >&2
+  sed -n '1,200p' "$fixture/stderr" >&2
+  sed -n '1,200p' "$fixture/calls.log" >&2
+  fail "continuous add failed with status $RUN_STATUS"
+fi
 [[ $(grep -c '^CREATE ' "$fixture/calls.log") -eq 2 ]] || fail "continuous add must create twice"
 [[ $(grep -c '^CONTROLLER restart' "$fixture/calls.log") -eq 2 ]] || fail "continuous add must restart twice"
 assert_contains "$fixture/calls.log" '--name first-app --app-id cli_first123'
 assert_contains "$fixture/calls.log" '--name second-app --app-id cli_second456'
+assert_contains "$fixture/calls.log" "--workspace-dir $fixture/root/workspace-one --model gpt-5.6-sol --effort high --enabled=true"
+assert_contains "$fixture/calls.log" "--workspace-dir $fixture/root/workspace-two --model gpt-5.6-terra --effort medium --enabled=true"
 [[ $(awk -F '\t' 'NF { seen[$1 FS $2 FS $3]++ } END { for (key in seen) if (seen[key] != 1) exit 1; print length(seen) }' "$fixture/apps.tsv") -eq 2 ]] || fail "continuous add must leave two unique exact records"
+
+fixture="$TEST_TMP/two-second-create-fails"
+new_fixture "$fixture"
+run_fixture "$fixture" "first-ok\n$fixture/root/workspace-one\ncli_firstok123\nfirst-ok-secret\ngpt-5.6-sol\nhigh\ny\ny\nsecond-fails\n$fixture/root/workspace-two\ncli_secondfails456\nsecond-fail-secret\ngpt-5.6-terra\nmedium\ny\n" FAKE_CREATE_FAIL_ON=2
+[[ $RUN_STATUS -ne 0 ]] || fail "a second create failure must stop continuous mode"
+[[ $(grep -c '^CREATE ' "$fixture/calls.log") -eq 2 ]] || fail "second create failure must make exactly two create attempts"
+[[ $(grep -c '^CONTROLLER restart' "$fixture/calls.log") -eq 1 ]] || fail "second create failure must not trigger a second restart"
+[[ $(wc -l <"$fixture/apps.tsv") -eq 1 ]] || fail "second create failure must preserve only the first record"
 
 # Final confirmation cancellation is a successful no-op.
 fixture="$TEST_TMP/cancel"
@@ -470,13 +492,18 @@ assert_contains "$fixture/calls.log" 'SECRET_STDIN_LENGTH='
 for create_status in 0 19; do
   fixture="$TEST_TMP/env-xtrace-$create_status"
   new_fixture "$fixture"
-  printf '%s\n' 'set -x' 'CODEX_WORKSPACE_BOT_DB_PASSWORD=dotenv-sentinel-90817' >>"$fixture/root/.env"
+  printf '%s\n' 'set -x' \
+    'CODEX_WORKSPACE_BOT_DB_PASSWORD=dotenv-db-sentinel-90817' \
+    'OPENAI_API_KEY=dotenv-provider-sentinel-90817' \
+    'CODEX_WORKSPACE_BOT_ATTACHMENT_KEY_V1=dotenv-crypto-sentinel-90817' >>"$fixture/root/.env"
   secret_value="xtrace-secret-$create_status-90817"
   run_fixture "$fixture" "xtrace-app\n$fixture/root/workspace-one\ncli_xtrace123\n$secret_value\ngpt-5.6-sol\nhigh\ny\nn\n" FAKE_CREATE_STATUS=$create_status
   [[ $RUN_STATUS -ne 0 ]] || fail ".env set -x must be rejected"
   assert_no_create_or_restart "$fixture"
   ! grep -R -Fq -- "$secret_value" "$fixture" || fail "secret leaked while .env enabled xtrace (status $create_status)"
-  ! grep -R -Fq -- 'dotenv-sentinel-90817' "$fixture/stdout" "$fixture/stderr" "$fixture/calls.log" "$fixture/root/runtime" || fail "dotenv sentinel leaked"
+  for sentinel in dotenv-db-sentinel-90817 dotenv-provider-sentinel-90817 dotenv-crypto-sentinel-90817; do
+    ! grep -R -Fq -- "$sentinel" "$fixture/stdout" "$fixture/stderr" "$fixture/calls.log" "$fixture/root/runtime" || fail "dotenv sentinel leaked"
+  done
 done
 
 for payload in 'printf() { :; }' "trap 'printf leaked' DEBUG" 'CODEX_WORKSPACE_BOT_DB_PASSWORD=$(printf leaked)' 'PATH=/attacker/bin' 'HOME=/attacker/home' 'BASH_ENV=/tmp/evil'; do

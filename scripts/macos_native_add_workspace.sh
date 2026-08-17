@@ -3,15 +3,20 @@ set +x
 set -euo pipefail
 
 ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+OS_HOME=${HOME:?HOME is required}
 ENV_FILE="$ROOT/.env"
 CONFIG_FILE="$ROOT/config.yaml"
 APPCTL_MAIN="$ROOT/cmd/appctl/main.go"
 RECEIVERCHECK_MAIN="$ROOT/cmd/receivercheck/main.go"
+SAFEDOTENV_MAIN="$ROOT/cmd/safedotenv/main.go"
 CONTROLLER="$ROOT/macos_bot_controller.sh"
 PRIVATE_TOOL_DIR=
 APPCTL_BIN=
 RECEIVERCHECK_BIN=
+SAFEDOTENV_BIN=
 APP_LIST=
+BASE_URL=
+SENSITIVE_DIRS=()
 CANCEL_STATUS=20
 DEFAULT_MODEL=gpt-5.6-terra
 DEFAULT_EFFORT=high
@@ -36,6 +41,7 @@ cleanup_private_tools() {
   [[ -n ${PRIVATE_TOOL_DIR:-} ]] || return 0
   [[ -z ${APPCTL_BIN:-} ]] || rm -f -- "$APPCTL_BIN"
   [[ -z ${RECEIVERCHECK_BIN:-} ]] || rm -f -- "$RECEIVERCHECK_BIN"
+  [[ -z ${SAFEDOTENV_BIN:-} ]] || rm -f -- "$SAFEDOTENV_BIN"
   rmdir -- "$PRIVATE_TOOL_DIR" 2>/dev/null || true
 }
 
@@ -45,13 +51,23 @@ build_private_tools() {
   chmod 0700 "$PRIVATE_TOOL_DIR"
   APPCTL_BIN="$PRIVATE_TOOL_DIR/appctl"
   RECEIVERCHECK_BIN="$PRIVATE_TOOL_DIR/receivercheck"
+  SAFEDOTENV_BIN="$PRIVATE_TOOL_DIR/safedotenv"
   trap cleanup_private_tools EXIT
   (
     cd "$ROOT"
     go build -o "$APPCTL_BIN" ./cmd/appctl
     go build -o "$RECEIVERCHECK_BIN" ./cmd/receivercheck
+    go build -o "$SAFEDOTENV_BIN" ./cmd/safedotenv
   ) || fail "无法编译私有管理工具；请先执行 go build ./... 查看错误"
-  chmod 0700 "$APPCTL_BIN" "$RECEIVERCHECK_BIN"
+  chmod 0700 "$APPCTL_BIN" "$RECEIVERCHECK_BIN" "$SAFEDOTENV_BIN"
+}
+
+dotenv_get() {
+  "$SAFEDOTENV_BIN" get --file "$ENV_FILE" --key "$1" --allow-missing
+}
+
+run_appctl() {
+  "$SAFEDOTENV_BIN" exec --file "$ENV_FILE" -- "$APPCTL_BIN" "$@"
 }
 
 ask_yes_no() {
@@ -76,20 +92,26 @@ require_existing_install() {
   [[ -f $CONFIG_FILE ]] || fail "没有找到 config.yaml；请先完成 macOS 原生初始化"
   [[ -f $APPCTL_MAIN ]] || fail "没有找到 cmd/appctl；当前安装不完整"
   [[ -f $RECEIVERCHECK_MAIN ]] || fail "没有找到 cmd/receivercheck；当前安装不完整"
+  [[ -f $SAFEDOTENV_MAIN ]] || fail "没有找到 cmd/safedotenv；当前安装不完整"
   [[ -x $CONTROLLER ]] || fail "没有找到可执行的 macos_bot_controller.sh；当前安装不完整"
   command -v go >/dev/null 2>&1 || fail "没有找到 Go；请先修复原生安装"
   command -v curl >/dev/null 2>&1 || fail "没有找到 curl；请先修复原生安装"
 
-  set -a
-  # .env is the existing native install's private runtime environment.
-  # shellcheck disable=SC1090
-  . "$ENV_FILE"
-  set +x
-  set +a
+  build_private_tools
+  "$SAFEDOTENV_BIN" validate --file "$ENV_FILE" || fail ".env 包含不受支持或可能执行的内容；请先修复，脚本没有读取其中的秘密"
 
-  if [[ -n ${CODEX_HOME:-} && -f $CODEX_HOME/config.toml ]]; then
-    DEFAULT_MODEL=$(awk -F'"' '/^model[[:space:]]*=/ { print $2; exit }' "$CODEX_HOME/config.toml")
-    DEFAULT_EFFORT=$(awk -F'"' '/^model_reasoning_effort[[:space:]]*=/ { print $2; exit }' "$CODEX_HOME/config.toml")
+  local codex_home user_dir mount_user_dir mount_workspace_dir sensitive
+  codex_home=$(dotenv_get CODEX_HOME)
+  user_dir=$(dotenv_get USER_DIR)
+  mount_user_dir=$(dotenv_get AIPM_MOUNT_USER_DIR)
+  mount_workspace_dir=$(dotenv_get AIPM_MOUNT_WORKSPACE_DIR)
+  for sensitive in "$codex_home" "$user_dir" "$mount_user_dir" "$mount_workspace_dir"; do
+    [[ -n $sensitive && $sensitive == /* ]] && SENSITIVE_DIRS+=("$sensitive")
+  done
+
+  if [[ -n $codex_home && -f $codex_home/config.toml ]]; then
+    DEFAULT_MODEL=$(awk -F'"' '/^model[[:space:]]*=/ { print $2; exit }' "$codex_home/config.toml")
+    DEFAULT_EFFORT=$(awk -F'"' '/^model_reasoning_effort[[:space:]]*=/ { print $2; exit }' "$codex_home/config.toml")
   fi
   [[ $DEFAULT_MODEL =~ ^[A-Za-z0-9][A-Za-z0-9._/-]*$ ]] || DEFAULT_MODEL=gpt-5.6-terra
   case "$DEFAULT_EFFORT" in
@@ -97,10 +119,10 @@ require_existing_install() {
     *) DEFAULT_EFFORT=high ;;
   esac
 
-  build_private_tools
+  BASE_URL=$("$RECEIVERCHECK_BIN" --config "$CONFIG_FILE" --print-base-url) || fail "config.yaml 的 server.listen_addr 必须是本机 loopback 地址和合法端口"
   if ! APP_LIST=$(
     cd "$ROOT"
-    "$APPCTL_BIN" list --config ./config.yaml
+    run_appctl list --config ./config.yaml
   ); then
     fail "无法读取 MySQL 中的 App 列表；请先确认 MySQL 已启动、.env 和 config.yaml 正确"
   fi
@@ -131,7 +153,7 @@ refresh_app_list() {
   local refreshed
   if ! refreshed=$(
     cd "$ROOT"
-    "$APPCTL_BIN" list --config ./config.yaml
+    run_appctl list --config ./config.yaml
   ); then
     return 1
   fi
@@ -149,22 +171,29 @@ created_app_matches() {
   return 1
 }
 
-enabled_app_count() {
-  local existing_name existing_id existing_workspace existing_enabled count=0
-  while IFS=$'\t' read -r existing_name existing_id existing_workspace existing_enabled; do
-    [[ $existing_enabled == true ]] && count=$((count + 1))
-  done <<<"$APP_LIST"
-  printf '%s\n' "$count"
+enabled_receiver_ids() {
+  local output id joined=
+  output=$(cd "$ROOT" && run_appctl receiver-ids --config ./config.yaml) || return 1
+  while IFS= read -r id; do
+    [[ -n $id && $id != *,* ]] || return 1
+    if [[ -n $joined ]]; then
+      joined="$joined,$id"
+    else
+      joined=$id
+    fi
+  done <<<"$output"
+  [[ -n $joined ]] || return 1
+  printf '%s\n' "$joined"
 }
 
 strict_receivers_connected() {
-  local expected_count=$1 attempts=${CODEX_WORKSPACE_BOT_ADD_READY_ATTEMPTS:-30}
+  local expected_ids=$1 attempts=${CODEX_WORKSPACE_BOT_ADD_READY_ATTEMPTS:-30}
   local health ready
   [[ $attempts =~ ^[1-9][0-9]*$ ]] || attempts=30
   while (( attempts > 0 )); do
-    health=$(curl --fail --silent --show-error --connect-timeout 2 --max-time 5 http://127.0.0.1:8080/healthz 2>/dev/null || true)
-    ready=$(curl --fail --silent --show-error --connect-timeout 2 --max-time 5 http://127.0.0.1:8080/readyz 2>/dev/null || true)
-    if [[ $health == ok ]] && printf '%s' "$ready" | "$RECEIVERCHECK_BIN" --expected "$expected_count" >/dev/null 2>&1; then
+    health=$(curl --fail --silent --show-error --connect-timeout 2 --max-time 5 "$BASE_URL/healthz" 2>/dev/null || true)
+    ready=$(curl --fail --silent --show-error --connect-timeout 2 --max-time 5 "$BASE_URL/readyz" 2>/dev/null || true)
+    if [[ $health == ok ]] && printf '%s' "$ready" | "$RECEIVERCHECK_BIN" --expected-ids "$expected_ids" >/dev/null 2>&1; then
       return 0
     fi
     attempts=$((attempts - 1))
@@ -174,14 +203,22 @@ strict_receivers_connected() {
 }
 
 dangerous_workspace() {
-  local path=$1
+  local path=$1 sensitive
   case "$path" in
-    /|"$HOME"|"$HOME"/.ssh|"$HOME"/.ssh/*|"$HOME"/.codex|"$HOME"/.codex/*|\
+    /|"$OS_HOME"|"$OS_HOME"/.ssh|"$OS_HOME"/.ssh/*|"$OS_HOME"/.codex|"$OS_HOME"/.codex/*|\
       /System|/System/*|/Library|/Library/*|/Applications|/Applications/*|\
       /usr|/usr/*|/bin|/bin/*|/sbin|/sbin/*|/etc|/etc/*|/var|/var/*|/private|/private/*)
       return 0
       ;;
   esac
+  for sensitive in "${SENSITIVE_DIRS[@]}"; do
+    case "$path/" in
+      "$sensitive/"* ) return 0 ;;
+    esac
+    case "$sensitive/" in
+      "$path/"* ) return 0 ;;
+    esac
+  done
   return 1
 }
 
@@ -237,7 +274,7 @@ add_one_workspace() {
   create_status=0
   printf '%s' "$app_secret" | (
     cd "$ROOT"
-    "$APPCTL_BIN" create \
+    run_appctl create \
       --config ./config.yaml \
       --name "$app_name" \
       --app-id "$app_id" \
@@ -259,7 +296,10 @@ add_one_workspace() {
     printf '请进入 %s 执行：go run ./cmd/appctl list --config ./config.yaml\n' "$ROOT" >&2
     return 1
   fi
-  expected_receivers=$(enabled_app_count)
+  expected_receivers=$(enabled_receiver_ids) || {
+    printf '添加 Workspace：无法回读 enabled App 的 receiver ID，登记状态需人工核对；Bot 尚未重启。\n' >&2
+    return 1
+  }
 
   if ! (
     cd "$ROOT"

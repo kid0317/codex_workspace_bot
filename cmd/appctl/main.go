@@ -67,6 +67,14 @@ func main() {
 		for _, a := range apps {
 			fmt.Printf("%s\t%s\t%s\t%t\n", a.Name, a.FeishuAppID, a.WorkspaceDir, a.Enabled)
 		}
+	case "receiver-ids":
+		apps, err := store.ListApps(context.Background())
+		if err != nil {
+			fail(err)
+		}
+		for _, id := range enabledReceiverIDs(apps) {
+			fmt.Println(id)
+		}
 	case "enable", "disable":
 		if *name == "" {
 			usage()
@@ -114,7 +122,7 @@ func main() {
 	}
 }
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: appctl create|update|upsert|import-legacy-app|list|enable|disable|delete --config config.yaml [--name NAME] [--secret-stdin|--secret-env ENV_NAME]")
+	fmt.Fprintln(os.Stderr, "usage: appctl create|update|upsert|import-legacy-app|list|receiver-ids|enable|disable|delete --config config.yaml [--name NAME] [--secret-stdin|--secret-env ENV_NAME]")
 	os.Exit(2)
 }
 func fail(err error) { fmt.Fprintln(os.Stderr, "appctl:", err); os.Exit(1) }
@@ -176,4 +184,14 @@ func bytesContainLineBreak(value []byte) bool {
 		}
 	}
 	return false
+}
+
+func enabledReceiverIDs(apps []storage.App) []string {
+	ids := make([]string, 0, len(apps))
+	for _, app := range apps {
+		if app.Enabled {
+			ids = append(ids, app.ID)
+		}
+	}
+	return ids
 }
