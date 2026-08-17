@@ -39,7 +39,7 @@ try {
     $plain = $null
 }
 try {
-    Invoke-Compose up -d mysql
+    Invoke-Compose up -d --wait mysql
     $mountPath = (Resolve-Path $secretPath).Path
     Invoke-Compose run --rm --no-deps -v "${mountPath}:/run/secrets/feishu:ro" bot /usr/local/bin/secure-appctl --config /space/config/bot.yaml --name $appName --app-id $appId --secret-file /run/secrets/feishu --workspace-dir "/space/apps/$appName/workspace" --model $model --effort high
 } finally {
