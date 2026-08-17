@@ -43,12 +43,19 @@ bot_port="${bot_port:-8080}"
 random_hex() {
   if command -v openssl >/dev/null 2>&1; then openssl rand -hex 32; else od -An -N32 -tx1 /dev/urandom | tr -d ' \n'; fi
 }
+random_base64_32() {
+  if command -v openssl >/dev/null 2>&1; then
+    openssl rand -base64 32 | tr -d '\n'
+  else
+    od -An -N32 -tx1 /dev/urandom | tr -d ' \n' | xxd -r -p | base64 | tr -d '\n'
+  fi
+}
 space_id="space-$(random_hex | cut -c1-16)"
 project_name="codex-space-$(printf '%s' "$space_id" | tail -c 9)"
 db_root_password="$(random_hex)"
 db_password="$(random_hex)"
-attachment_key="$(random_hex)"
-action_key="$(random_hex)"
+attachment_key="$(random_base64_32)"
+action_key="$(random_base64_32)"
 
 staging="${install_path}.staging.$$"
 cleanup() { rm -rf "$staging"; }

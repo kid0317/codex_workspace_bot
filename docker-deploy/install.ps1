@@ -43,6 +43,13 @@ function New-RandomHex([int]$Bytes = 32) {
     return -join ($buffer | ForEach-Object { $_.ToString("x2") })
 }
 
+function New-RandomBase64([int]$Bytes = 32) {
+    $buffer = New-Object byte[] $Bytes
+    $rng = [Security.Cryptography.RandomNumberGenerator]::Create()
+    try { $rng.GetBytes($buffer) } finally { $rng.Dispose() }
+    return [Convert]::ToBase64String($buffer)
+}
+
 function Protect-CurrentUserFile([string]$Path) {
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent().User
     $acl = New-Object Security.AccessControl.FileSecurity
@@ -64,8 +71,8 @@ try {
 
     $dbRoot = New-RandomHex
     $dbPassword = New-RandomHex
-    $attachmentKey = New-RandomHex
-    $actionKey = New-RandomHex
+    $attachmentKey = New-RandomBase64
+    $actionKey = New-RandomBase64
     $bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secureProviderKey)
     try {
         $providerKey = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr)
