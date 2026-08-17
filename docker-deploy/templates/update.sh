@@ -2,6 +2,7 @@
 set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib.sh"
 require_space
+umask 077
 
 manifest_source="${RELEASE_MANIFEST_URL:-}"
 check_only=false
@@ -49,12 +50,9 @@ timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
 backup_dir="$space_root/system/backups/$timestamp"
 mkdir -p "$backup_dir"
 cp "$space_root/.env" "$space_root/space.lock.json" "$manifest" "$backup_dir/"
-if compose ps --status running --services | grep -qx mysql; then
-  compose exec -T mysql sh -c 'MYSQL_PWD="$MYSQL_PASSWORD" mysqldump -u"$MYSQL_USER" "$MYSQL_DATABASE"' > "$backup_dir/mysql.sql"
-else
-  compose up -d mysql
-  compose exec -T mysql sh -c 'MYSQL_PWD="$MYSQL_PASSWORD" mysqldump -u"$MYSQL_USER" "$MYSQL_DATABASE"' > "$backup_dir/mysql.sql"
-fi
+compose up -d --wait mysql
+compose exec -T mysql sh -c 'MYSQL_PWD="$MYSQL_PASSWORD" mysqldump --no-tablespaces -u"$MYSQL_USER" "$MYSQL_DATABASE"' > "$backup_dir/mysql.sql"
+test -s "$backup_dir/mysql.sql" || { echo "数据库备份失败。" >&2; exit 1; }
 
 old_env="$tmp_dir/old.env"
 cp "$space_root/.env" "$old_env"
@@ -77,4 +75,3 @@ jq --arg version "$version" --arg digest "$digest" '.version=$version | .image_d
 cp "$tmp_dir/space.lock.json" "$space_root/space.lock.json"
 trap cleanup EXIT INT TERM
 echo "更新完成：$version"
-

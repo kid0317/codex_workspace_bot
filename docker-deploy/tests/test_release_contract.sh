@@ -94,6 +94,10 @@ for backup_script in update.sh uninstall.sh; do
     echo "$backup_script must support MySQL 8.4 dumps without PROCESS privilege" >&2
     exit 1
   fi
+  if ! grep -Fq 'compose up -d --wait mysql' "$deploy_dir/templates/$backup_script"; then
+    echo "$backup_script must wait for MySQL before creating a destructive-operation backup" >&2
+    exit 1
+  fi
 done
 for backup_script in update.ps1 uninstall.ps1; do
   if ! grep -Fq 'mysqldump --no-tablespaces' "$deploy_dir/templates/$backup_script"; then
@@ -102,6 +106,10 @@ for backup_script in update.ps1 uninstall.ps1; do
   fi
   if ! grep -Fq 'Protect-CurrentUserFile $backupPath' "$deploy_dir/templates/$backup_script"; then
     echo "$backup_script must protect the secret-bearing database backup" >&2
+    exit 1
+  fi
+  if ! grep -Fq 'Invoke-Compose up -d --wait mysql' "$deploy_dir/templates/$backup_script"; then
+    echo "$backup_script must wait for MySQL before creating a destructive-operation backup" >&2
     exit 1
   fi
 done

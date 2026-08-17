@@ -2,6 +2,7 @@
 set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib.sh"
 require_space
+umask 077
 
 purge=false
 delete_backups=false
@@ -27,9 +28,10 @@ test "$typed" = "$expected" || { echo "Space ID 不一致，已取消。" >&2; e
 
 timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
 mkdir -p "$space_root/system/backups/$timestamp"
-if compose ps --status running --services | grep -qx mysql; then
-  compose exec -T mysql sh -c 'MYSQL_PWD="$MYSQL_PASSWORD" mysqldump -u"$MYSQL_USER" "$MYSQL_DATABASE"' > "$space_root/system/backups/$timestamp/mysql.sql"
-fi
+backup_path="$space_root/system/backups/$timestamp/mysql.sql"
+compose up -d --wait mysql
+compose exec -T mysql sh -c 'MYSQL_PWD="$MYSQL_PASSWORD" mysqldump --no-tablespaces -u"$MYSQL_USER" "$MYSQL_DATABASE"' > "$backup_path"
+test -s "$backup_path" || { echo "数据库备份失败，拒绝清理。" >&2; exit 1; }
 compose down -v
 
 for generated in compose.yaml .env start.sh stop.sh status.sh logs.sh manage.sh update.sh uninstall.sh start.ps1 stop.ps1 status.ps1 logs.ps1 manage.ps1 update.ps1 uninstall.ps1 lib.sh lib.ps1; do
