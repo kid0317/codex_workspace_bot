@@ -2,8 +2,11 @@ package main
 
 import (
 	"bytes"
+	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/kid0317/codex-workspace-bot/internal/storage"
 )
 
 func TestResolveAppSecretFromEnvironment(t *testing.T) {
@@ -111,5 +114,18 @@ func TestResolveAppSecretStdinRejectsEmptyNewlineAndOversize(t *testing.T) {
 				t.Fatal("resolveAppSecret() error = nil, want validation failure")
 			}
 		})
+	}
+}
+
+func TestEnabledReceiverIDsUseInternalAppIDs(t *testing.T) {
+	apps := []storage.App{
+		{ID: "internal-a", FeishuAppID: "cli_public_a", Enabled: true},
+		{ID: "internal-disabled", FeishuAppID: "cli_disabled", Enabled: false},
+		{ID: "internal-b", FeishuAppID: "cli_public_b", Enabled: true},
+	}
+	got := enabledReceiverIDs(apps)
+	want := []string{"internal-a", "internal-b"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("enabledReceiverIDs() = %#v, want internal IDs %#v", got, want)
 	}
 }

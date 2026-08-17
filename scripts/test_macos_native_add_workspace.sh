@@ -22,19 +22,23 @@ assert_no_create_or_restart() {
 
 new_fixture() {
   local fixture=$1
-  mkdir -p "$fixture/root/scripts" "$fixture/root/cmd/appctl" "$fixture/root/cmd/receivercheck" "$fixture/root/bin" \
+  mkdir -p "$fixture/root/scripts" "$fixture/root/cmd/appctl" "$fixture/root/cmd/receivercheck" "$fixture/root/cmd/safedotenv" "$fixture/root/bin" \
     "$fixture/root/runtime" "$fixture/root/workspace-one" "$fixture/root/workspace-two" \
-    "$fixture/root/runtime-home" "$fixture/home/.ssh" "$fixture/home/.codex"
+    "$fixture/root/runtime home 中文" "$fixture/root/user data 中文" "$fixture/root/mounted-user" \
+    "$fixture/home/.ssh" "$fixture/home/.codex"
   cp "$SCRIPT" "$fixture/root/scripts/macos_native_add_workspace.sh"
   chmod +x "$fixture/root/scripts/macos_native_add_workspace.sh"
   : >"$fixture/root/cmd/appctl/main.go"
   : >"$fixture/root/cmd/receivercheck/main.go"
+  : >"$fixture/root/cmd/safedotenv/main.go"
   printf '%s\n' \
     'CODEX_WORKSPACE_BOT_DB_PASSWORD=test-db-password' \
-    "CODEX_HOME=$fixture/root/runtime-home" >"$fixture/root/.env"
+    "CODEX_HOME=${fixture// /\\ }/root/runtime\ home\ 中文" \
+    "USER_DIR=${fixture// /\\ }/root/user\ data\ 中文" \
+    "AIPM_MOUNT_USER_DIR=${fixture// /\\ }/root/mounted-user" >"$fixture/root/.env"
   printf '%s\n' 'model = "provider-default-model"' 'model_reasoning_effort = "medium"' \
-    >"$fixture/root/runtime-home/config.toml"
-  printf '%s\n' 'database:' '  password_env: CODEX_WORKSPACE_BOT_DB_PASSWORD' >"$fixture/root/config.yaml"
+    >"$fixture/root/runtime home 中文/config.toml"
+  printf '%s\n' 'server:' '  listen_addr: 127.0.0.1:9191' 'database:' '  password_env: CODEX_WORKSPACE_BOT_DB_PASSWORD' >"$fixture/root/config.yaml"
   : >"$fixture/calls.log"
 
   cat >"$fixture/root/bin/uname" <<'EOF'
@@ -52,7 +56,7 @@ target=
 previous=
 for argument in "$@"; do
   [[ $previous == -o ]] && output=$argument
-  case "$argument" in ./cmd/appctl|./cmd/receivercheck) target=$argument ;; esac
+  case "$argument" in ./cmd/appctl|./cmd/receivercheck|./cmd/safedotenv) target=$argument ;; esac
   previous=$argument
 done
 [[ -n $output && -n $target ]] || exit 94
@@ -110,37 +114,96 @@ case "$command_name" in
     fi
     unset secret_value
     if [[ ${FAKE_CREATE_RACE:-0} -eq 1 ]]; then
-      printf '%s\t%s\t%s\ttrue\n' "$app_name" "cli_competing" "/competing/workspace" >>"${FAKE_STATE:?}"
+      printf '%s\t%s\t%s\ttrue\t%s\n' "$app_name" "cli_competing" "/competing/workspace" "internal-$app_name" >>"${FAKE_STATE:?}"
       exit 17
     fi
     [[ ${FAKE_CREATE_STATUS:-0} -eq 0 ]] || exit "$FAKE_CREATE_STATUS"
     if [[ ${FAKE_READBACK_MISMATCH:-0} -eq 1 ]]; then
       workspace=/wrong/readback/workspace
     fi
-    printf '%s\t%s\t%s\t%s\n' "$app_name" "$app_id" "$workspace" "$enabled" >>"${FAKE_STATE:?}"
+    printf '%s\t%s\t%s\t%s\t%s\n' "$app_name" "$app_id" "$workspace" "$enabled" "internal-$app_name" >>"${FAKE_STATE:?}"
     printf 'updated fake-app\n'
+    ;;
+  receiver-ids)
+    printf 'RECEIVER_IDS %s\n' "$*" >>"${FAKE_CALLS:?}"
+    [[ ! -f ${FAKE_STATE:?} ]] || awk -F '\t' '$4 == "true" { if ($5 != "") print $5; else print "internal-existing-" NR }' "$FAKE_STATE"
     ;;
   *) exit 97 ;;
 esac
 APPCTL_EOF
-else
+elif [[ $target == ./cmd/receivercheck ]]; then
   cat >"$output" <<'RECEIVER_EOF'
 #!/usr/bin/env bash
 set -euo pipefail
-expected=
+if [[ ${1:-} == --config && ${3:-} == --print-base-url ]]; then
+  printf 'http://127.0.0.1:9191\n'
+  exit 0
+fi
+expected_ids=
 previous=
 for argument in "$@"; do
-  [[ $previous == --expected ]] && expected=$argument
+  [[ $previous == --expected-ids ]] && expected_ids=$argument
   previous=$argument
 done
 payload=$(cat)
 printf 'RECEIVERCHECK %s\n' "$*" >>"${FAKE_CALLS:?}"
-[[ -n $expected ]] || exit 81
-states=$(printf '%s\n' "$payload" | grep -Eo '"state":"[^"]+"' || true)
-count=$(printf '%s\n' "$states" | awk 'NF { n++ } END { print n+0 }')
-connected=$(printf '%s\n' "$states" | grep -Ec '"connected"$' || true)
-[[ $count -eq $expected && $connected -eq $expected ]] || exit 1
+[[ -n $expected_ids ]] || exit 81
+IFS=, read -r -a ids <<<"$expected_ids"
+[[ $(printf '%s\n' "$payload" | grep -Ec '"state":"connected"') -eq ${#ids[@]} ]] || exit 1
+for id in "${ids[@]}"; do
+  [[ $payload == *\"$id\":\{\"state\":\"connected\"\}* ]] || exit 1
+done
 RECEIVER_EOF
+else
+  cat >"$output" <<'DOTENV_EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+command_name=${1:-}
+shift || true
+file=
+key=
+while (( $# > 0 )); do
+  case "$1" in
+    --file) file=$2; shift 2 ;;
+    --key) key=$2; shift 2 ;;
+    --allow-missing) shift ;;
+    --) shift; break ;;
+    *) break ;;
+  esac
+done
+DOTENV_NAMES=()
+DOTENV_VALUES=()
+while IFS= read -r line || [[ -n $line ]]; do
+  [[ -z $line || $line == \#* ]] && continue
+  [[ $line =~ ^([A-Z][A-Z0-9_]*)=(.*)$ ]] || exit 64
+  name=${BASH_REMATCH[1]}
+  value=${BASH_REMATCH[2]}
+  case "$name" in
+    CODEX_WORKSPACE_BOT_*|CODEX_HOME|USER_DIR|AIPM_MOUNT_WORKSPACE_DIR|AIPM_MOUNT_USER_DIR|AIPM_STATE|SANDBOX_STATE|OPENAI_*|DASHSCOPE_*|LANGFUSE_*) ;;
+    *) exit 64 ;;
+  esac
+  [[ $value != *'$('* && $value != *'`'* ]] || exit 64
+  value=${value//\\ / }
+  value=${value//\\\$/\$}
+  DOTENV_NAMES+=("$name")
+  DOTENV_VALUES+=("$value")
+done <"$file"
+case "$command_name" in
+  validate) exit 0 ;;
+  get)
+    for ((i=0; i<${#DOTENV_NAMES[@]}; i++)); do
+      [[ ${DOTENV_NAMES[i]} == "$key" ]] && { printf '%s' "${DOTENV_VALUES[i]}"; exit 0; }
+    done
+    exit 0
+    ;;
+  exec)
+    child_env=("HOME=$HOME" "PATH=$PATH")
+    for ((i=0; i<${#DOTENV_NAMES[@]}; i++)); do child_env+=("${DOTENV_NAMES[i]}=${DOTENV_VALUES[i]}"); done
+    exec env -i "${child_env[@]}" "$@"
+    ;;
+  *) exit 64 ;;
+esac
+DOTENV_EOF
 fi
 chmod 0700 "$output"
 EOF
@@ -172,8 +235,8 @@ case "$url" in
     [[ ! -f ${FAKE_READY_COUNTER:?} ]] || read -r ready_call <"$FAKE_READY_COUNTER"
     ready_call=$((ready_call + 1))
     printf '%s\n' "$ready_call" >"$FAKE_READY_COUNTER"
-    enabled_count=$(awk -F '\t' '$4 == "true" { count++ } END { print count+0 }' "${FAKE_STATE:?}")
-    shown_count=$enabled_count
+    mapfile -t enabled_ids < <(awk -F '\t' '$4 == "true" { if ($5 != "") print $5; else print "internal-existing-" NR }' "${FAKE_STATE:?}")
+    shown_count=${#enabled_ids[@]}
     state=connected
     case "${FAKE_READY_MODE:-connected}" in
       reconnecting-once)
@@ -190,7 +253,9 @@ case "$url" in
     index=1
     while (( index <= shown_count )); do
       (( index == 1 )) || printf ','
-      printf '"app-%s":{"state":"%s"}' "$index" "$state"
+      receiver_id=${enabled_ids[index-1]}
+      [[ ${FAKE_READY_MODE:-} != wrong-same-count ]] || receiver_id="wrong-$index"
+      printf '"%s":{"state":"%s"}' "$receiver_id" "$state"
       index=$((index + 1))
     done
     printf '},"observability":"disabled"}\n'
@@ -236,6 +301,8 @@ if rg -n -- '--secret([=[:space:]]|$)' "$SCRIPT" >/dev/null; then
 fi
 rg -q -- '--secret-stdin' "$SCRIPT" || fail "the script must use appctl --secret-stdin"
 ! rg -q -- '--secret-env' "$SCRIPT" || fail "the add-Workspace script must not export the App Secret"
+! rg -n '(^|[;[:space:]])(source|\.)[[:space:]].*ENV_FILE|eval[[:space:]]' "$SCRIPT" || fail "the script must never source or eval .env"
+rg -q 'cmd/safedotenv' "$SCRIPT" || fail "the script must build the shared safe dotenv loader"
 rg -q -- 'go build.*cmd/appctl|go build' "$SCRIPT" || fail "the script must build a private appctl before reading the secret"
 rg -q -- 'macos_bot_controller\.sh[" ]+restart' "$SCRIPT" || fail "the script must reuse the macOS controller restart command"
 
@@ -257,8 +324,8 @@ fi
 assert_contains "$fixture/calls.log" '--enabled=true'
 assert_contains "$fixture/calls.log" '--secret-stdin'
 assert_contains "$fixture/stdout" '已经登记并生效'
-assert_contains "$fixture/calls.log" 'http://127.0.0.1:8080/healthz'
-assert_contains "$fixture/calls.log" 'http://127.0.0.1:8080/readyz'
+assert_contains "$fixture/calls.log" 'http://127.0.0.1:9191/healthz'
+assert_contains "$fixture/calls.log" 'http://127.0.0.1:9191/readyz'
 [[ -z $(find "$fixture/root/runtime" -mindepth 1 -maxdepth 1 -print -quit) ]] || fail "private helper binaries must be cleaned after exit"
 while IFS= read -r curl_call; do
   [[ $curl_call == *'--connect-timeout 2'* ]] || fail "curl must bound connect time"
@@ -272,6 +339,22 @@ run_fixture "$fixture" "defaults-app\n$fixture/root/workspace-one\ncli_defaults1
 [[ $RUN_STATUS -eq 0 ]] || fail "runtime config defaults scenario failed"
 assert_contains "$fixture/calls.log" '--model provider-default-model'
 assert_contains "$fixture/calls.log" '--effort medium'
+
+fixture="$TEST_TMP/config-missing"
+new_fixture "$fixture"
+rm "$fixture/root/runtime home 中文/config.toml"
+run_fixture "$fixture" "fallback-app\n$fixture/root/workspace-one\ncli_fallback123\nfallback-secret\n\n\ny\nn\n"
+[[ $RUN_STATUS -eq 0 ]] || fail "missing runtime config must use safe defaults"
+assert_contains "$fixture/calls.log" '--model gpt-5.6-terra'
+assert_contains "$fixture/calls.log" '--effort high'
+
+fixture="$TEST_TMP/config-invalid"
+new_fixture "$fixture"
+printf '%s\n' 'model = "$(bad-model)"' 'model_reasoning_effort = "dangerous"' >"$fixture/root/runtime home 中文/config.toml"
+run_fixture "$fixture" "invalid-default-app\n$fixture/root/workspace-one\ncli_invaliddefault123\ninvalid-default-secret\n\n\ny\nn\n"
+[[ $RUN_STATUS -eq 0 ]] || fail "invalid runtime config must use safe defaults"
+assert_contains "$fixture/calls.log" '--model gpt-5.6-terra'
+assert_contains "$fixture/calls.log" '--effort high'
 
 # Continuous mode adds two independent App/Workspace pairs.
 fixture="$TEST_TMP/two"
@@ -335,6 +418,21 @@ for dangerous_path in / "$fixture/home" "$fixture/home/.ssh" "$fixture/home/.cod
   assert_contains "$fixture/stderr" '危险目录'
 done
 
+for dynamic_path in "$fixture/root/runtime home 中文" "$fixture/root/user data 中文" "$fixture/root/mounted-user" "$fixture/root"; do
+  fixture="$TEST_TMP/dynamic-danger-$(printf '%s' "$dynamic_path" | cksum | awk '{print $1}')"
+  new_fixture "$fixture"
+  case "$dynamic_path" in
+    */runtime\ home\ 中文) rejected_path="$fixture/root/runtime home 中文" ;;
+    */user\ data\ 中文) rejected_path="$fixture/root/user data 中文" ;;
+    */mounted-user) rejected_path="$fixture/root/mounted-user" ;;
+    *) rejected_path="$fixture/root" ;;
+  esac
+  run_fixture "$fixture" "dynamic-danger-app\n$rejected_path\n"
+  [[ $RUN_STATUS -ne 0 ]] || fail "dynamic sensitive Workspace $rejected_path must fail"
+  assert_no_create_or_restart "$fixture"
+  assert_contains "$fixture/stderr" '危险目录'
+done
+
 fixture="$TEST_TMP/invalid-app-id"
 new_fixture "$fixture"
 run_fixture "$fixture" "id-app\n$fixture/root/workspace-one\nnot_cli_123\n"
@@ -368,20 +466,26 @@ assert_contains "$fixture/calls.log" 'SECRET_STDIN_LENGTH='
 ! grep -q 'SECRET_VISIBLE_TO_CONTROLLER' "$fixture/calls.log" || fail "secret remained exported during restart"
 ! grep -q 'SECRET_ENV_VISIBLE_TO_APPCTL' "$fixture/calls.log" || fail "secret reached appctl through the environment"
 
-# A hostile .env may enable xtrace; success and failure still must not reveal the newly entered secret.
+# Executable dotenv content is rejected as data before prompts and never leaks sentinels.
 for create_status in 0 19; do
   fixture="$TEST_TMP/env-xtrace-$create_status"
   new_fixture "$fixture"
-  printf '%s\n' 'set -x' >>"$fixture/root/.env"
+  printf '%s\n' 'set -x' 'CODEX_WORKSPACE_BOT_DB_PASSWORD=dotenv-sentinel-90817' >>"$fixture/root/.env"
   secret_value="xtrace-secret-$create_status-90817"
-  if [[ $create_status -eq 0 ]]; then
-    run_fixture "$fixture" "xtrace-app\n$fixture/root/workspace-one\ncli_xtrace123\n$secret_value\ngpt-5.6-sol\nhigh\ny\nn\n"
-    [[ $RUN_STATUS -eq 0 ]] || fail ".env set -x success case failed"
-  else
-    run_fixture "$fixture" "xtrace-fail-app\n$fixture/root/workspace-one\ncli_xtracefail123\n$secret_value\ngpt-5.6-sol\nhigh\ny\n" FAKE_CREATE_STATUS=$create_status
-    [[ $RUN_STATUS -ne 0 ]] || fail ".env set -x failure case must fail"
-  fi
+  run_fixture "$fixture" "xtrace-app\n$fixture/root/workspace-one\ncli_xtrace123\n$secret_value\ngpt-5.6-sol\nhigh\ny\nn\n" FAKE_CREATE_STATUS=$create_status
+  [[ $RUN_STATUS -ne 0 ]] || fail ".env set -x must be rejected"
+  assert_no_create_or_restart "$fixture"
   ! grep -R -Fq -- "$secret_value" "$fixture" || fail "secret leaked while .env enabled xtrace (status $create_status)"
+  ! grep -R -Fq -- 'dotenv-sentinel-90817' "$fixture/stdout" "$fixture/stderr" "$fixture/calls.log" "$fixture/root/runtime" || fail "dotenv sentinel leaked"
+done
+
+for payload in 'printf() { :; }' "trap 'printf leaked' DEBUG" 'CODEX_WORKSPACE_BOT_DB_PASSWORD=$(printf leaked)' 'PATH=/attacker/bin' 'HOME=/attacker/home' 'BASH_ENV=/tmp/evil'; do
+  fixture="$TEST_TMP/hostile-dotenv-$(printf '%s' "$payload" | cksum | awk '{print $1}')"
+  new_fixture "$fixture"
+  printf '%s\n' "$payload" >>"$fixture/root/.env"
+  run_fixture "$fixture" ''
+  [[ $RUN_STATUS -ne 0 ]] || fail "hostile dotenv content must be rejected: $payload"
+  assert_no_create_or_restart "$fixture"
 done
 
 # appctl failure does not restart or claim success.
@@ -438,6 +542,14 @@ run_fixture "$fixture" "reconnect-app\n$fixture/root/workspace-one\ncli_reconnec
 [[ $RUN_STATUS -eq 0 ]] || fail "reconnecting receiver should become connected"
 [[ $(<"$fixture/ready-counter") -ge 2 ]] || fail "strict activation must wait past reconnecting"
 assert_contains "$fixture/stdout" '已经登记并生效'
+
+# A same-size map with the wrong internal receiver ID must not be accepted.
+fixture="$TEST_TMP/wrong-receiver-id"
+new_fixture "$fixture"
+run_fixture "$fixture" "wrong-id-app\n$fixture/root/workspace-one\ncli_wrongid123\nwrong-id-secret\ngpt-5.6-sol\nhigh\ny\n" \
+  FAKE_READY_MODE=wrong-same-count CODEX_WORKSPACE_BOT_ADD_READY_ATTEMPTS=2
+[[ $RUN_STATUS -ne 0 ]] || fail "wrong same-count receiver IDs must fail activation"
+assert_contains "$fixture/stderr" '已登记但未生效'
 
 # Strict activation also waits until receiver count equals enabled App count.
 fixture="$TEST_TMP/receiver-count"

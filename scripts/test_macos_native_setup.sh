@@ -22,7 +22,9 @@ bash -n "$SETUP"
 if rg -n -- '--secret[[:space:]]+"?\$' "$SETUP" >/dev/null; then
   fail "setup must not pass the Feishu secret as a command-line argument"
 fi
-rg -q -- '--secret-env' "$SETUP" || fail "setup must pass the Feishu secret through appctl --secret-env"
+rg -q -- '--secret-stdin' "$SETUP" || fail "setup must pass the Feishu secret through appctl stdin"
+! rg -n '(^|[;[:space:]])(source|\.)[[:space:]].*ENV_FILE|eval[[:space:]]' "$SETUP" || fail "setup must never source or eval .env"
+rg -q 'cmd/safedotenv' "$SETUP" || fail "setup must use the shared safe dotenv loader"
 rg -q -- 'appctl upsert' "$SETUP" || fail "idempotent first-time setup must use explicit appctl upsert"
 
 tmp_dir=$(mktemp -d)
