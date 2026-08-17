@@ -32,7 +32,7 @@ umask 077
 printf '%s\n' "$feishu_secret" > "$secret_file"
 unset feishu_secret
 
-compose up -d mysql
+compose up -d --wait mysql
 compose run --rm --no-deps \
   -v "$secret_file:/run/secrets/feishu:ro" \
   bot /usr/local/bin/secure-appctl \
